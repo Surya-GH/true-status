@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>True Status</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden;height:100vh;}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:#555;border-radius:4px;}
+</style>
+</head>
+<body>
+<div id="root" style="height:100vh;"></div>
+<script type="text/babel" data-presets="react">
+const {useState,useEffect,useRef,useCallback} = React;
+
+const DEFAULT_STATUSES = [
+  {id:"online",   label:"Online",   emoji:"🟢",color:"#1D9E75",bg:"#E1F5EE",dbg:"#04342C"},
+  {id:"sleeping", label:"Sleeping", emoji:"😴",color:"#8B7FE8",bg:"#EEEDFE",dbg:"#26215C"},
+  {id:"silent",   label:"Silent",   emoji:"🔕",color:"#888780",bg:"#F1EFE8",dbg:"#2C2C2A"},
+  {id:"busy",     label:"Busy",     emoji:"🎯",color:"#D85A30",bg:"#FAECE7",dbg:"#4A1B0C"},
+  {id:"driving",  label:"Driving",  emoji:"🚗",color:"#378ADD",bg:"#E6F1FB",dbg:"#042C53"},
+  {id:"eating",   label:"Eating",   emoji:"🍽️",color:"#BA7517",bg:"#FAEEDA",dbg:"#412402"},
+  {id:"away",     label:"Away",     emoji:"📵",color:"#E24B4A",bg:"#FCEBEB",dbg:"#501313"},
+  {id:"focusing", label:"Focusing", emoji:"💻",color:"#639922",bg:"#EAF3DE",dbg:"#173404"},
+];
+const AVATARS=["🐻","🦊","🐼","🐸","🦁","🐯","🐨","🦋","🐬","🦄"];
+const EMOJI_OPTIONS=["✨","🎵","🏋️","📚","🌙","☕","🎮","🏠","🌿","💤","🔥","😊","🎯","🌊","🎨","🍕","💪","🧘"];
+const DB="https://true-status-7d9f6-default-rtdb.asia-southeast1.firebasedatabase.app";
+
+async function dbGet(p){const r=await fetch(DB+p+".json");if(!r.ok)throw new Error(r.status);return r.json();}
+async function dbSet(p,d){const r=await fetch(DB+p+".json",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status);}
+async function dbDel(p){await fetch(DB+p+".json",{method:"DELETE"});}
+async function dbPatch(p,d){await fetch(DB+p+".json",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(d)});}
+
+function timeAgo(ts){
+  if(!ts)return"";
+  const s=Math.floor((Date.now()-ts)/1000);
+  if(s<10)return"just now";if(s<60)return s+"s ago";
+  if(s<3600)return Math.floor(s/60)+"m ago";return Math.floor(s/3600)+"h ago";
+}
+function chime(){
+  try{
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    const o=ctx.createOscillator(),g=ctx.createGain();
+    o.connect(g);g.connect(ctx.destination);o.type="sine";
+    o.frequency.setValueAtTime(880,ctx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(440,ctx.currentTime+0.3);
+    g.gain.setValueAtTime(0.12,ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.4);
+    o.start();o.stop(ctx.currentTime+0.4);
+  }catch(e){}
+}
+
+function Toast({msg,onClose}){
+  useEffect(()=>{const t=setTimeout(onClose,3500);return()=>clearTimeout(t);},[]);
+  return <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",padding:"10px 20px",borderRadius:10,fontSize:13,fontWeight:500,zIndex:9999,whiteSpace:"nowrap",background:"#1a1a1a",color:"#fff",boxShadow:"0 4px 20px rgba(0,0,0,0.4)"}}>{msg}</div>;
+}
+
+function Modal({children,onClose,dark}){
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{background:dark?"#1e1e1e":"#fff",border:"0.5px solid "+(dark?"#333":"#e0e0e0"),borderRadius:16,padding:"1.5rem",width:340,maxWidth:"92vw"}}>
+      {children}
+    </div>
+  </div>;
+}
+
+function App(){
+  const [dark,setDark]=useState(false);
+  const [screen,setScreen]=useState("profile"); // profile|home|waiting|board
+  const [profile,setProfile]=useState({name:"",avatar:AVATARS[0]});
+  const [rooms,setRooms]=useState({}); // {code:{name,members,meta,pending,unread}}
+  const [activeRoom,setActiveRoom]=useState(null);
+  const [myStatus,setMyStatus]=useState("online");
+  const [myNote,setMyNote]=useState("");
+  const [userId,setUserId]=useState(null);
+  const [toast,setToast]=useState(null);
+  const [modal,setModal]=useState(null); // null|"create"|"join"|"custom"|"profile"|"confirmRemove"
+  const [modalData,setModalData]=useState({});
+  const [connecting,setConnecting]=useState(false);
+  const [sidebarOpen,setSidebarOpen]=useState(true);
+  const [waitingRoom,setWaitingRoom]=useState(null);
+
+  const pollRefs=useRef({});
+  const waitPollRef=useRef(null);
+  const userIdRef=useRef(userId);
+  const profileRef=useRef(profile);
+  const myStatusRef=useRef(myStatus);
+  const myNoteRef=useRef(myNote);
+  const roomsRef=useRef(rooms);
+  const activeRoomRef=useRef(activeRoom);
+
+  useEffect(()=>{userIdRef.current=userId;},[userId]);
+  useEffect(()=>{profileRef.current=profile;},[profile]);
+  useEffect(()=>{myStatusRef.current=myStatus;},[myStatus]);
+  useEffect(()=>{myNoteRef.current=myNote;},[myNote]);
+  useEffect(()=>{roomsRef.current=rooms;},[rooms]);
+  useEffect(()=>{activeRoomRef.current=activeRoom;},[activeRoom]);
+
+  useEffect(()=>{
+    try{
+      const s=JSON.parse(localStorage.getItem("ts_v6")||"null");
+      if(s){
+        setUserId(s.userId||null);
+        setProfile({name:s.name||"",avatar:s.avatar||AVATARS[0]});
+        setMyStatus(s.status||"online");
+        setDark(!!s.dark);
+        if(s.userId&&s.name) setScreen("home");
+      }
+    }catch(e){}
+    return()=>{
+      Object.values(pollRefs.current).forEach(clearInterval);
+      clearInterval(waitPollRef.current);
+    };
+  },[]);
+
+  function saveMeta(o={}){
+    try{localStorage.setItem("ts_v6",JSON.stringify({userId:userIdRef.current,name:profileRef.current.name,avatar:profileRef.current.avatar,status:myStatusRef.current,dark,...o}));}catch(e){}
+  }
+
+  function allStatuses(code){
+    const r=rooms[code];
+    return[...DEFAULT_STATUSES,...((r&&r.meta&&r.meta.customStatuses)||[])];
+  }
+
+  function startRoomPoll(code,uid){
+    if(pollRefs.current[code]) clearInterval(pollRefs.current[code]);
+    const poll=async()=>{
+      try{
+        const [members,meta,pending]= await Promise.all([
+          dbGet("/rooms/"+code+"/members"),
+          dbGet("/rooms/"+code+"/meta"),
+          dbGet("/rooms/"+code+"/pending"),
+        ]);
+        const safeMembers=members||{};
+        const safeMeta=meta||{};
+        const safePending=pending||{};
+
+        // kicked?
+        if(!safeMembers[uid]){
+          clearInterval(pollRefs.current[code]);
+          delete pollRefs.current[code];
+          setRooms(prev=>{const n={...prev};delete n[code];return n;});
+          if(activeRoomRef.current===code){setActiveRoom(null);setScreen("home");}
+          setToast("You were removed from room "+code);
+          return;
+        }
+
+        setRooms(prev=>{
+          const prevRoom=prev[code]||{};
+          const prevMembers=prevRoom.members||{};
+          let unread=activeRoomRef.current===code?0:(prevRoom.unread||0);
+          const allSt=[...DEFAULT_STATUSES,...(safeMeta.customStatuses||[])];
+          Object.keys(safeMembers).forEach(id=>{
+            const m=safeMembers[id];
+            if(id!==uid&&prevMembers[id]&&prevMembers[id].status!==m.status){
+              if(activeRoomRef.current===code){
+                const found=allSt.find(s=>s.id===m.status);
+                setToast(m.name+" is now "+(found?found.label+" "+found.emoji:m.status));
+                chime();
+              } else {
+                unread++;
+              }
+            }
+          });
+          // new join requests for owner
+          if(safeMeta.owner===uid){
+            const prevPending=(prevRoom.pending)||{};
+            Object.keys(safePending).forEach(pid=>{
+              if(!prevPending[pid]){chime();setToast(safePending[pid].name+" wants to join "+code+"!");}
+            });
+          }
+          return{...prev,[code]:{...prevRoom,members:safeMembers,meta:safeMeta,pending:safePending,unread}};
+        });
+      }catch(e){}
+    };
+    poll();
+    pollRefs.current[code]=setInterval(poll,3000);
+  }
+
+  function startWaitPoll(code,uid){
+    clearInterval(waitPollRef.current);
+    const poll=async()=>{
+      try{
+        const members=await dbGet("/rooms/"+code+"/members")||{};
+        const pending=await dbGet("/rooms/"+code+"/pending")||{};
+        if(members[uid]){
+          clearInterval(waitPollRef.current);
+          const meta=await dbGet("/rooms/"+code+"/meta")||{};
+          setRooms(prev=>({...prev,[code]:{...prev[code],members,meta,pending:{},unread:0}}));
+          setActiveRoom(code);
+          setScreen("board");
+          startRoomPoll(code,uid);
+          setToast("Welcome to the room! 🎉");
+        } else if(!pending[uid]){
+          clearInterval(waitPollRef.current);
+          setWaitingRoom(null);
+          setScreen("home");
+          setToast("Your request was denied.");
+        }
+      }catch(e){}
+    };
+    poll();
+    waitPollRef.current=setInterval(poll,3000);
+  }
+
+  async function writeMe(code,uid,st,note){
+    await dbSet("/rooms/"+code+"/members/"+uid,{
+      name:profileRef.current.name,avatar:profileRef.current.avatar,status:st,note:note,ts:Date.now()
+    });
+  }
+
+  async function createRoom(roomName){
+    setConnecting(true);
+    const uid=userId||("u_"+Date.now()+"_"+Math.random().toString(36).slice(2,6));
+    const code=Math.random().toString(36).slice(2,8).toUpperCase();
+    try{
+      await writeMe(code,uid,myStatus,myNote);
+      await dbSet("/rooms/"+code+"/meta",{owner:uid,roomName:roomName||code,customStatuses:[]});
+      if(!userId){setUserId(uid);userIdRef.current=uid;}
+      setRooms(prev=>({...prev,[code]:{members:{[uid]:{name:profileRef.current.name,avatar:profileRef.current.avatar,status:myStatus,note:myNote,ts:Date.now()}},meta:{owner:uid,roomName:roomName||code,customStatuses:[]},pending:{},unread:0}}));
+      setActiveRoom(code);
+      startRoomPoll(code,uid);
+      saveMeta({userId:uid});
+      setScreen("board");
+      setModal(null);
+    }catch(e){setToast("Failed to create room.");}
+    setConnecting(false);
+  }
+
+  async function requestJoin(code){
+    setConnecting(true);
+    const uid=userId||("u_"+Date.now()+"_"+Math.random().toString(36).slice(2,6));
+    try{
+      const meta=await dbGet("/rooms/"+code+"/meta");
+      if(!meta){setToast("Room not found.");setConnecting(false);return;}
+      await dbSet("/rooms/"+code+"/pending/"+uid,{name:profileRef.current.name,avatar:profileRef.current.avatar,status:myStatus,ts:Date.now()});
+      if(!userId){setUserId(uid);userIdRef.current=uid;}
+      setWaitingRoom({code,name:meta.roomName||code});
+      setRooms(prev=>({...prev,[code]:{members:{},meta,pending:{},unread:0}}));
+      saveMeta({userId:uid});
+      setModal(null);
+      setScreen("waiting");
+      startWaitPoll(code,uid);
+    }catch(e){setToast("Could not connect.");}
+    setConnecting(false);
+  }
+
+  async function leaveRoom(code){
+    clearInterval(pollRefs.current[code]);
+    delete pollRefs.current[code];
+    const r=rooms[code];
+    const isOwner=r&&r.meta&&r.meta.owner===userId;
+    await dbDel("/rooms/"+code+"/members/"+userId);
+    if(isOwner) await dbDel("/rooms/"+code);
+    setRooms(prev=>{const n={...prev};delete n[code];return n;});
+    if(activeRoom===code){setActiveRoom(null);setScreen("home");}
+  }
+
+  async function removeMember(code,id){
+    await dbDel("/rooms/"+code+"/members/"+id);
+    setRooms(prev=>{
+      const n={...prev};
+      if(n[code]&&n[code].members){const m={...n[code].members};delete m[id];n[code]={...n[code],members:m};}
+      return n;
+    });
+    setModal(null);
+    setToast("Member removed.");
+  }
+
+  async function approveRequest(code,pid){
+    const req=rooms[code]&&rooms[code].pending&&rooms[code].pending[pid];
+    if(!req)return;
+    await dbSet("/rooms/"+code+"/members/"+pid,{...req,ts:Date.now()});
+    await dbDel("/rooms/"+code+"/pending/"+pid);
+    setRooms(prev=>{
+      const n={...prev};
+      if(n[code]){
+        const p={...n[code].pending};delete p[pid];
+        const m={...n[code].members,[pid]:{...req,ts:Date.now()}};
+        n[code]={...n[code],pending:p,members:m};
+      }
+      return n;
+    });
+    setToast(req.name+" approved!");
+  }
+
+  async function denyRequest(code,pid){
+    await dbDel("/rooms/"+code+"/pending/"+pid);
+    setRooms(prev=>{
+      const n={...prev};
+      if(n[code]){const p={...n[code].pending};delete p[pid];n[code]={...n[code],pending:p};}
+      return n;
+    });
+  }
+
+  async function updateMyStatus(sid){
+    setMyStatus(sid);myStatusRef.current=sid;
+    if(activeRoom) await writeMe(activeRoom,userId,sid,myNoteRef.current);
+    saveMeta();
+  }
+
+  async function updateMyNote(note){
+    setMyNote(note);myNoteRef.current=note;
+    if(activeRoom){
+      await dbPatch("/rooms/"+activeRoom+"/members/"+userId,{note,ts:Date.now()});
+    }
+  }
+
+  async function addCustomStatus(code,label,emoji){
+    const r=rooms[code];if(!r)return;
+    const cur=(r.meta&&r.meta.customStatuses)||[];
+    const colors=["#1D9E75","#8B7FE8","#D85A30","#378ADD","#BA7517","#E24B4A","#639922","#D4537E"];
+    const bgs=["#E1F5EE","#EEEDFE","#FAECE7","#E6F1FB","#FAEEDA","#FCEBEB","#EAF3DE","#FBEAF0"];
+    const idx=cur.length%colors.length;
+    const ns={id:"c_"+Date.now(),label,emoji,color:colors[idx],bg:bgs[idx],dbg:"#222",custom:true};
+    const updated=[...cur,ns];
+    await dbSet("/rooms/"+code+"/meta/customStatuses",updated);
+    setRooms(prev=>({...prev,[code]:{...prev[code],meta:{...prev[code].meta,customStatuses:updated}}}));
+    setModal(null);
+  }
+
+  async function removeCustomStatus(code,id){
+    const r=rooms[code];if(!r)return;
+    const updated=((r.meta&&r.meta.customStatuses)||[]).filter(s=>s.id!==id);
+    await dbSet("/rooms/"+code+"/meta/customStatuses",updated);
+    setRooms(prev=>({...prev,[code]:{...prev[code],meta:{...prev[code].meta,customStatuses:updated}}}));
+    if(myStatus===id)setMyStatus("online");
+  }
+
+  function openRoom(code){
+    setActiveRoom(code);
+    setScreen("board");
+    setRooms(prev=>({...prev,[code]:{...prev[code],unread:0}}));
+  }
+
+  const d=dark;
+  const tc=d?"#f0f0f0":"#111";
+  const mc=d?"#777":"#666";
+  const cbg=d?"#1e1e1e":"#fff";
+  const cbr=d?"#2a2a2a":"#e0e0e0";
+  const sbg=d?"#1a1a1a":"#f0f0f0";
+  const appBg=d?"#0d0d0d":"#f5f5f5";
+  const sidebarBg=d?"#141414":"#fafafa";
+  const sidebarBorder=d?"#222":"#e8e8e8";
+
+  const inp={background:d?"#222":"#fff",color:tc,border:"0.5px solid "+(d?"#444":"#ccc"),borderRadius:8,padding:"8px 12px",width:"100%",fontSize:14,fontFamily:"inherit",outline:"none"};
+  const btn={background:"transparent",color:tc,border:"0.5px solid "+(d?"#444":"#ccc"),borderRadius:8,padding:"8px 16px",fontSize:14,cursor:"pointer",fontFamily:"inherit"};
+
+  const activeRoomData=activeRoom?rooms[activeRoom]:null;
+  const roomMembers=activeRoomData?activeRoomData.members||{}:{};
+  const roomMeta=activeRoomData?activeRoomData.meta||{}:{};
+  const roomPending=activeRoomData?activeRoomData.pending||{}:{};
+  const isOwner=roomMeta.owner===userId;
+  const myStatusObj=allStatuses(activeRoom).find(s=>s.id===myStatus)||DEFAULT_STATUSES[0];
+  const others=Object.entries(roomMembers).filter(([id])=>id!==userId).sort(([,a],[,b])=>b.ts-a.ts);
+  const pendingList=Object.entries(roomPending);
+  const roomList=Object.entries(rooms);
+  const totalUnread=roomList.reduce((sum,[,r])=>sum+(r.unread||0),0);
+
+  function StatusGrid({code,selected,onSelect}){
+    const sts=allStatuses(code);
+    const owner=rooms[code]&&rooms[code].meta&&rooms[code].meta.owner===userId;
+    return <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+      {sts.map(s=>(
+        <button key={s.id} onClick={()=>onSelect(s.id)}
+          style={{...btn,padding:"6px 2px",border:s.id===selected?"2px solid "+s.color:"0.5px solid "+(d?"#333":"#ddd"),background:s.id===selected?(d?s.dbg:s.bg):"transparent",display:"flex",flexDirection:"column",alignItems:"center",gap:3,position:"relative"}}>
+          {s.custom&&owner&&<span onClick={e=>{e.stopPropagation();removeCustomStatus(code,s.id);}} style={{position:"absolute",top:2,right:3,fontSize:9,opacity:0.5}}>✕</span>}
+          <span style={{fontSize:16}}>{s.emoji}</span>
+          <span style={{fontSize:10,color:s.id===selected?s.color:mc}}>{s.label}</span>
+        </button>
+      ))}
+      <button onClick={()=>setModal("custom")} style={{...btn,padding:"6px 2px",border:"0.5px dashed #888",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+        <span style={{fontSize:16}}>＋</span>
+        <span style={{fontSize:10,color:mc}}>Custom</span>
+      </button>
+    </div>;
+  }
+
+  // ========== PROFILE SETUP ==========
+  if(screen==="profile") return (
+    <div style={{background:appBg,minHeight:"100vh",color:tc,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      {toast&&<Toast msg={toast} onClose={()=>setToast(null)}/>}
+      <div style={{maxWidth:400,width:"100%",padding:"2rem 1.5rem"}}>
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{fontSize:48,marginBottom:12}}>{profile.avatar}</div>
+          <h1 style={{fontSize:26,fontWeight:600,marginBottom:6}}>True Status</h1>
+          <p style={{color:mc,fontSize:14}}>Set up your profile to get started.</p>
+        </div>
+        <div style={{marginBottom:16}}>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:6}}>Your name</label>
+          <input style={inp} value={profile.name} onChange={e=>setProfile(p=>({...p,name:e.target.value}))} placeholder="e.g. Arjun" onKeyDown={e=>{if(e.key==="Enter"&&profile.name.trim()){const uid="u_"+Date.now()+"_"+Math.random().toString(36).slice(2,6);setUserId(uid);saveMeta({userId:uid});setScreen("home");}}} />
+        </div>
+        <div style={{marginBottom:28}}>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:8}}>Pick your avatar</label>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {AVATARS.map(a=>(
+              <button key={a} onClick={()=>setProfile(p=>({...p,avatar:a}))}
+                style={{...btn,width:44,height:44,fontSize:22,padding:0,border:a===profile.avatar?"2px solid #378ADD":"0.5px solid "+(d?"#444":"#ccc"),background:a===profile.avatar?"#E6F1FB":"transparent"}}>
+                {a}
+              </button>
+            ))}
+          </div>
+        </div>
+        <button onClick={()=>{if(!profile.name.trim())return;const uid="u_"+Date.now()+"_"+Math.random().toString(36).slice(2,6);setUserId(uid);saveMeta({userId:uid});setScreen("home");}}
+          disabled={!profile.name.trim()}
+          style={{...btn,width:"100%",padding:"12px 0",fontWeight:600,fontSize:15,opacity:profile.name.trim()?1:0.4,background:"#1D9E75",color:"#fff",border:"none"}}>
+          Get Started →
+        </button>
+      </div>
+    </div>
+  );
+
+  // ========== WAITING SCREEN ==========
+  if(screen==="waiting") return (
+    <div style={{background:appBg,minHeight:"100vh",color:tc,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      {toast&&<Toast msg={toast} onClose={()=>setToast(null)}/>}
+      <div style={{textAlign:"center",padding:"2rem",maxWidth:360}}>
+        <div style={{fontSize:52,marginBottom:20}}>⏳</div>
+        <h2 style={{fontSize:20,fontWeight:500,marginBottom:8}}>Waiting for approval</h2>
+        <p style={{fontSize:14,color:mc,marginBottom:6}}>Your request to join <strong>{waitingRoom&&waitingRoom.name}</strong> has been sent.</p>
+        <p style={{fontSize:13,color:mc,marginBottom:28}}>The admin will approve or deny your request.</p>
+        <div style={{display:"flex",alignItems:"center",gap:12,justifyContent:"center",background:cbg,border:"0.5px solid "+cbr,borderRadius:12,padding:"12px 20px",marginBottom:24}}>
+          <span style={{fontSize:30}}>{profile.avatar}</span>
+          <div style={{textAlign:"left"}}>
+            <p style={{fontWeight:500}}>{profile.name}</p>
+            <p style={{fontSize:12,color:mc}}>Pending approval...</p>
+          </div>
+        </div>
+        <button onClick={()=>{clearInterval(waitPollRef.current);if(waitingRoom)dbDel("/rooms/"+waitingRoom.code+"/pending/"+userId);setScreen("home");setWaitingRoom(null);}}
+          style={{...btn,padding:"8px 24px",color:"#E24B4A",borderColor:"#E24B4A"}}>
+          Cancel request
+        </button>
+      </div>
+    </div>
+  );
+
+  // ========== MAIN LAYOUT (home + board) ==========
+  return (
+    <div style={{display:"flex",height:"100vh",background:appBg,color:tc}}>
+      {toast&&<Toast msg={toast} onClose={()=>setToast(null)}/>}
+
+      {/* ===== MODALS ===== */}
+      {modal==="create"&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <h3 style={{fontSize:16,fontWeight:600,marginBottom:16}}>Create a room</h3>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:6}}>Room name</label>
+          <input style={{...inp,marginBottom:16}} defaultValue="" placeholder="e.g. Family, Squad..."
+            id="rname" onKeyDown={e=>{if(e.key==="Enter") createRoom(document.getElementById("rname").value.trim());}} />
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={()=>createRoom(document.getElementById("rname").value.trim())} disabled={connecting}
+              style={{...btn,flex:1,fontWeight:600,background:"#1D9E75",color:"#fff",border:"none"}}>
+              {connecting?"Creating...":"Create"}
+            </button>
+          </div>
+        </Modal>
+      )}
+      {modal==="join"&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <h3 style={{fontSize:16,fontWeight:600,marginBottom:16}}>Join a room</h3>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:6}}>Room code</label>
+          <input style={{...inp,marginBottom:16,letterSpacing:3,textTransform:"uppercase"}} placeholder="e.g. X7KQ2A"
+            id="jcode" onKeyDown={e=>{if(e.key==="Enter"){const v=document.getElementById("jcode").value.trim().toUpperCase();if(v)requestJoin(v);}}} />
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={()=>{const v=document.getElementById("jcode").value.trim().toUpperCase();if(v)requestJoin(v);}} disabled={connecting}
+              style={{...btn,flex:1,fontWeight:600,background:"#378ADD",color:"#fff",border:"none"}}>
+              {connecting?"Requesting...":"Request to join"}
+            </button>
+          </div>
+        </Modal>
+      )}
+      {modal==="custom"&&activeRoom&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <h3 style={{fontSize:16,fontWeight:600,marginBottom:16}}>Add custom status</h3>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:6}}>Status name</label>
+          <input style={{...inp,marginBottom:14}} id="clabel" placeholder="e.g. At the gym"/>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:8}}>Pick an emoji</label>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:16}} id="cemoji-container">
+            {EMOJI_OPTIONS.map(em=>(
+              <button key={em} id={"ce_"+em} onClick={()=>{
+                document.querySelectorAll("[id^='ce_']").forEach(b=>b.style.border="0.5px solid "+(d?"#444":"#ccc"));
+                document.getElementById("ce_"+em).style.border="2px solid #378ADD";
+                document.getElementById("cemoji-container").dataset.selected=em;
+              }} style={{...btn,width:36,height:36,fontSize:18,padding:0}}>{em}</button>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={()=>{
+              const label=document.getElementById("clabel").value.trim();
+              const emoji=document.getElementById("cemoji-container").dataset.selected||"✨";
+              if(label) addCustomStatus(activeRoom,label,emoji);
+            }} style={{...btn,flex:1,fontWeight:600,background:"#8B7FE8",color:"#fff",border:"none"}}>Add</button>
+          </div>
+        </Modal>
+      )}
+      {modal==="confirmRemove"&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <p style={{fontSize:15,marginBottom:20,lineHeight:1.5}}>Remove <strong>{modalData.name}</strong> from this room?</p>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={()=>removeMember(activeRoom,modalData.id)} style={{...btn,flex:1,fontWeight:600,background:"#E24B4A",color:"#fff",border:"none"}}>Remove</button>
+          </div>
+        </Modal>
+      )}
+      {modal==="profile"&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <h3 style={{fontSize:16,fontWeight:600,marginBottom:16}}>Edit profile</h3>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:6}}>Name</label>
+          <input style={{...inp,marginBottom:14}} defaultValue={profile.name} id="pname"/>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:8}}>Avatar</label>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
+            {AVATARS.map(a=>(
+              <button key={a} id={"av_"+a} onClick={()=>{
+                document.querySelectorAll("[id^='av_']").forEach(b=>b.style.border="0.5px solid "+(d?"#444":"#ccc"));
+                document.getElementById("av_"+a).style.border="2px solid #378ADD";
+                document.getElementById("av-container").dataset.selected=a;
+              }} style={{...btn,width:40,height:40,fontSize:20,padding:0,border:a===profile.avatar?"2px solid #378ADD":"0.5px solid "+(d?"#444":"#ccc")}}>{a}</button>
+            ))}
+          </div>
+          <div id="av-container" data-selected={profile.avatar} style={{display:"none"}}/>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={()=>{
+              const name=document.getElementById("pname").value.trim();
+              const av=document.getElementById("av-container").dataset.selected||profile.avatar;
+              if(name){setProfile({name,avatar:av});saveMeta();setModal(null);setToast("Profile updated!");}
+            }} style={{...btn,flex:1,fontWeight:600,background:"#1D9E75",color:"#fff",border:"none"}}>Save</button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ===== SIDEBAR ===== */}
+      <div style={{width:sidebarOpen?260:60,flexShrink:0,background:sidebarBg,borderRight:"0.5px solid "+sidebarBorder,display:"flex",flexDirection:"column",transition:"width 0.2s",overflow:"hidden"}}>
+        {/* Sidebar header */}
+        <div style={{padding:"14px 12px",borderBottom:"0.5px solid "+sidebarBorder,display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+          <button onClick={()=>setSidebarOpen(p=>!p)} style={{...btn,width:36,height:36,padding:0,fontSize:18,flexShrink:0,border:"none"}}>
+            {sidebarOpen?"◀":"▶"}
+          </button>
+          {sidebarOpen&&<span style={{fontWeight:600,fontSize:15,whiteSpace:"nowrap"}}>True Status</span>}
+          {sidebarOpen&&totalUnread>0&&<span style={{marginLeft:"auto",background:"#E24B4A",color:"#fff",borderRadius:10,fontSize:11,padding:"2px 7px",fontWeight:600}}>{totalUnread}</span>}
+        </div>
+
+        {/* Profile pill */}
+        <div onClick={()=>setModal("profile")} style={{padding:"10px 12px",borderBottom:"0.5px solid "+sidebarBorder,display:"flex",alignItems:"center",gap:10,cursor:"pointer",flexShrink:0}} >
+          <span style={{fontSize:22,flexShrink:0}}>{profile.avatar}</span>
+          {sidebarOpen&&<div style={{minWidth:0}}>
+            <p style={{fontWeight:500,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{profile.name}</p>
+            <div style={{display:"flex",alignItems:"center",gap:4,marginTop:2}}>
+              <span style={{fontSize:11}}>{myStatusObj.emoji}</span>
+              <span style={{fontSize:11,color:myStatusObj.color}}>{myStatusObj.label}</span>
+            </div>
+          </div>}
+        </div>
+
+        {/* Room list */}
+        <div style={{flex:1,overflowY:"auto",padding:"8px 0"}}>
+          {roomList.length===0&&sidebarOpen&&(
+            <p style={{fontSize:12,color:mc,padding:"12px 16px",textAlign:"center"}}>No rooms yet.<br/>Create or join one!</p>
+          )}
+          {roomList.map(([code,r])=>{
+            const isActive=activeRoom===code;
+            const memberCount=Object.keys(r.members||{}).length;
+            const rName=(r.meta&&r.meta.roomName)||code;
+            const unread=r.unread||0;
+            const ownerOfRoom=r.meta&&r.meta.owner===userId;
+            return (
+              <div key={code} onClick={()=>openRoom(code)}
+                style={{padding:"10px 12px",margin:"2px 6px",borderRadius:10,cursor:"pointer",background:isActive?(d?"#252525":"#ebebeb"):"transparent",display:"flex",alignItems:"center",gap:10,transition:"background 0.15s"}}>
+                <div style={{width:36,height:36,borderRadius:"50%",background:isActive?(d?"#333":"#ddd"):(d?"#222":"#e8e8e8"),display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0,position:"relative"}}>
+                  {ownerOfRoom?"👑":"🏠"}
+                  {unread>0&&<span style={{position:"absolute",top:-2,right:-2,background:"#E24B4A",color:"#fff",borderRadius:8,fontSize:9,padding:"1px 4px",fontWeight:700}}>{unread}</span>}
+                </div>
+                {sidebarOpen&&<div style={{flex:1,minWidth:0}}>
+                  <p style={{fontSize:13,fontWeight:isActive?600:400,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{rName}</p>
+                  <p style={{fontSize:11,color:mc}}>{memberCount} member{memberCount!==1?"s":""} · {code}</p>
+                </div>}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Bottom actions */}
+        <div style={{padding:"10px 8px",borderTop:"0.5px solid "+sidebarBorder,display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
+          <button onClick={()=>setModal("create")} style={{...btn,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,justifyContent:sidebarOpen?"flex-start":"center",fontSize:13,border:"none",background:d?"#1a2a1a":"#e8f8ee",color:"#1D9E75",fontWeight:500}}>
+            <span>＋</span>{sidebarOpen&&"Create room"}
+          </button>
+          <button onClick={()=>setModal("join")} style={{...btn,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,justifyContent:sidebarOpen?"flex-start":"center",fontSize:13,border:"none",background:d?"#1a1a2a":"#e8f0fb",color:"#378ADD",fontWeight:500}}>
+            <span>→</span>{sidebarOpen&&"Join room"}
+          </button>
+          <button onClick={()=>setDark(p=>!p)} style={{...btn,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,justifyContent:sidebarOpen?"flex-start":"center",fontSize:13}}>
+            <span>{d?"☀️":"🌙"}</span>{sidebarOpen&&(d?"Light mode":"Dark mode")}
+          </button>
+        </div>
+      </div>
+
+      {/* ===== MAIN CONTENT ===== */}
+      <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column"}}>
+        {/* No room selected */}
+        {screen==="home"&&(
+          <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"2rem",textAlign:"center"}}>
+            <div style={{fontSize:52,marginBottom:16}}>📡</div>
+            <h2 style={{fontSize:20,fontWeight:500,marginBottom:8}}>Welcome, {profile.name}!</h2>
+            <p style={{color:mc,fontSize:14,marginBottom:28,maxWidth:300}}>Create a room or join one using a code to start sharing your status with your circle.</p>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setModal("create")} style={{...btn,padding:"10px 20px",background:"#1D9E75",color:"#fff",border:"none",fontWeight:500}}>✦ Create a room</button>
+              <button onClick={()=>setModal("join")} style={{...btn,padding:"10px 20px",background:"#378ADD",color:"#fff",border:"none",fontWeight:500}}>→ Join a room</button>
+            </div>
+          </div>
+        )}
+
+        {/* Board */}
+        {screen==="board"&&activeRoomData&&(
+          <div style={{maxWidth:560,width:"100%",margin:"0 auto",padding:"1.5rem 1rem"}}>
+            {/* Room header */}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <h2 style={{fontSize:18,fontWeight:600}}>{roomMeta.roomName||activeRoom}</h2>
+                  {isOwner&&<span style={{fontSize:11,background:d?"#412402":"#FAEEDA",color:"#BA7517",padding:"2px 8px",borderRadius:6,fontWeight:600}}>👑 Admin</span>}
+                </div>
+                <p style={{fontSize:12,color:mc,marginTop:2}}>Code: <strong style={{letterSpacing:1}}>{activeRoom}</strong> · {Object.keys(roomMembers).length} online</p>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <button onClick={()=>{if(navigator.clipboard)navigator.clipboard.writeText(activeRoom);setToast("Code copied: "+activeRoom);}} style={{...btn,fontSize:12,padding:"5px 10px"}}>Share</button>
+                <button onClick={()=>leaveRoom(activeRoom)} style={{...btn,fontSize:12,padding:"5px 10px",color:"#E24B4A",borderColor:"#E24B4A"}}>{isOwner?"Close":"Leave"}</button>
+              </div>
+            </div>
+
+            {/* Pending requests */}
+            {isOwner&&pendingList.length>0&&(
+              <div style={{background:d?"#0d1f0d":"#e8f8ee",border:"0.5px solid "+(d?"#1a3a1a":"#b2dfb2"),borderRadius:12,padding:"1rem",marginBottom:16}}>
+                <p style={{fontSize:11,fontWeight:700,color:"#1D9E75",letterSpacing:0.5,marginBottom:10}}>JOIN REQUESTS ({pendingList.length})</p>
+                {pendingList.map(([pid,req])=>(
+                  <div key={pid} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                    <span style={{fontSize:24}}>{req.avatar||"?"}</span>
+                    <div style={{flex:1}}>
+                      <p style={{fontWeight:500,fontSize:14}}>{req.name}</p>
+                      <p style={{fontSize:11,color:mc}}>{timeAgo(req.ts)}</p>
+                    </div>
+                    <button onClick={()=>approveRequest(activeRoom,pid)} style={{padding:"5px 12px",borderRadius:8,border:"none",background:"#1D9E75",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600}}>✓ Approve</button>
+                    <button onClick={()=>denyRequest(activeRoom,pid)} style={{padding:"5px 12px",borderRadius:8,border:"none",background:"#E24B4A",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600}}>✕ Deny</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* My status card */}
+            <div style={{background:sbg,border:"0.5px solid "+cbr,borderRadius:12,padding:"1rem",marginBottom:14}}>
+              <p style={{fontSize:11,color:mc,fontWeight:600,letterSpacing:0.5,marginBottom:10}}>MY STATUS</p>
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+                <span style={{fontSize:30}}>{profile.avatar}</span>
+                <div>
+                  <p style={{fontWeight:500,fontSize:15}}>{profile.name}{isOwner?" 👑":""}</p>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2}}>
+                    <span style={{fontSize:14}}>{myStatusObj.emoji}</span>
+                    <span style={{fontSize:13,color:myStatusObj.color,fontWeight:500}}>{myStatusObj.label}</span>
+                  </div>
+                </div>
+              </div>
+              <div style={{marginBottom:12}}><StatusGrid code={activeRoom} selected={myStatus} onSelect={updateMyStatus}/></div>
+              <input style={inp} value={myNote} onChange={e=>updateMyNote(e.target.value)} placeholder="Add a note..."/>
+            </div>
+
+            {/* Members */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <p style={{fontSize:11,color:mc,fontWeight:600,letterSpacing:0.5}}>MEMBERS ({others.length})</p>
+              {isOwner&&others.length>0&&<p style={{fontSize:11,color:mc}}>Tap Remove to kick</p>}
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {others.length===0&&(
+                <div style={{textAlign:"center",padding:"2rem 0",color:mc,fontSize:14}}>
+                  No one else here yet.<br/>
+                  <span style={{fontSize:13}}>Share code: <strong style={{letterSpacing:1}}>{activeRoom}</strong></span>
+                </div>
+              )}
+              {others.map(([id,m])=>{
+                const sts=allStatuses(activeRoom);
+                const st=sts.find(s=>s.id===m.status)||DEFAULT_STATUSES[0];
+                const memberIsOwner=roomMeta.owner===id;
+                return (
+                  <div key={id} style={{background:cbg,border:"0.5px solid "+cbr,borderRadius:12,padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
+                    <div style={{width:44,height:44,borderRadius:"50%",background:d?(st.dbg||"#222"):st.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>
+                      {m.avatar||"?"}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                        <span style={{fontWeight:500,fontSize:15}}>{m.name}</span>
+                        {memberIsOwner&&<span style={{fontSize:12}}>👑</span>}
+                        {m.status==="sleeping"&&<span style={{fontSize:10,background:d?"#26215C":"#EEEDFE",color:"#8B7FE8",padding:"2px 7px",borderRadius:6}}>do not disturb</span>}
+                        {(m.status==="busy"||m.status==="focusing"||m.status==="silent")&&<span style={{fontSize:10,background:d?"#4A1B0C":"#FAECE7",color:"#D85A30",padding:"2px 7px",borderRadius:6}}>urgent only</span>}
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3}}>
+                        <span style={{fontSize:14}}>{st.emoji}</span>
+                        <span style={{fontSize:13,color:st.color,fontWeight:500}}>{st.label}</span>
+                      </div>
+                      {m.note&&<p style={{fontSize:12,color:mc,marginTop:3}}>{m.note}</p>}
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0}}>
+                      <span style={{fontSize:11,color:mc}}>{timeAgo(m.ts)}</span>
+                      {isOwner&&!memberIsOwner&&(
+                        <button onClick={()=>{setModalData({id,name:m.name});setModal("confirmRemove");}}
+                          style={{fontSize:11,padding:"3px 8px",borderRadius:6,border:"0.5px solid #E24B4A",color:"#E24B4A",background:"transparent",cursor:"pointer"}}>Remove</button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p style={{textAlign:"center",fontSize:11,color:mc,marginTop:20}}>Polls every 3 seconds</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.render(React.createElement(App),document.getElementById("root"));
+</script>
+</body>
+</html>
