@@ -44,7 +44,8 @@ async function dbSet(path, data) {
   if (!r.ok) throw new Error("SET " + r.status);
 }
 async function dbDelete(path) {
-  await fetch(DB_URL + path + ".json", { method: "DELETE" });
+  const r = await fetch(DB_URL + path + ".json", { method: "DELETE" });
+  if (!r.ok) throw new Error("DEL " + r.status);
 }
 async function dbPatch(path, data) {
   await fetch(DB_URL + path + ".json", {
@@ -85,15 +86,15 @@ function Toast({ msg, onClose }) {
 }
 
 function ConfirmModal({ msg, onConfirm, onCancel, dark }) {
-  const cardBg = dark ? "#1e1e1e" : "#fff";
-  const textColor = dark ? "#f0f0f0" : "#111";
+  const bg = dark ? "#1e1e1e" : "#fff";
+  const tc = dark ? "#f0f0f0" : "#111";
   const border = dark ? "#333" : "#e0e0e0";
   return (
     <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:200 }}>
-      <div style={{ background:cardBg, border:"0.5px solid "+border, borderRadius:14, padding:"1.5rem", width:300, maxWidth:"90vw" }}>
-        <p style={{ fontSize:15, color:textColor, marginBottom:20, lineHeight:1.5 }}>{msg}</p>
+      <div style={{ background:bg, border:"0.5px solid "+border, borderRadius:14, padding:"1.5rem", width:300, maxWidth:"90vw" }}>
+        <p style={{ fontSize:15, color:tc, marginBottom:20, lineHeight:1.5 }}>{msg}</p>
         <div style={{ display:"flex", gap:8 }}>
-          <button onClick={onCancel} style={{ flex:1, padding:"8px 0", borderRadius:8, border:"0.5px solid "+border, background:"transparent", color:textColor, cursor:"pointer", fontSize:14 }}>Cancel</button>
+          <button onClick={onCancel} style={{ flex:1, padding:"8px 0", borderRadius:8, border:"0.5px solid "+border, background:"transparent", color:tc, cursor:"pointer", fontSize:14 }}>Cancel</button>
           <button onClick={onConfirm} style={{ flex:1, padding:"8px 0", borderRadius:8, border:"none", background:"#E24B4A", color:"#fff", cursor:"pointer", fontSize:14, fontWeight:500 }}>Remove</button>
         </div>
       </div>
@@ -101,9 +102,9 @@ function ConfirmModal({ msg, onConfirm, onCancel, dark }) {
   );
 }
 
-function App() {
+export default function App() {
   const [dark, setDark] = useState(false);
-  const [screen, setScreen] = useState("setup");
+  const [screen, setScreen] = useState("setup"); // setup | waiting | board
   const [name, setName] = useState("");
   const [avatar, setAvatar] = useState(AVATARS[0]);
   const [userId, setUserId] = useState(null);
@@ -112,7 +113,8 @@ function App() {
   const [roomCode, setRoomCode] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [group, setGroup] = useState({});
-  const [roomMeta, setRoomMeta] = useState({});  // {owner, customStatuses}
+  const [roomMeta, setRoomMeta] = useState({});
+  const [pendingRequests, setPendingRequests] = useState({});
   const [toast, setToast] = useState(null);
   const [dndAuto, setDndAuto] = useState(false);
   const [customStatuses, setCustomStatuses] = useState([]);
@@ -121,83 +123,121 @@ function App() {
   const [customEmoji, setCustomEmoji] = useState("✨");
   const [connecting, setConnecting] = useState(false);
   const [connError, setConnError] = useState("");
-  const [confirmRemove, setConfirmRemove] = useState(null); // {id, name}
+  const [confirmRemove, setConfirmRemove] = useState(null);
 
   const pollRef = useRef(null);
+  const waitPollRef = useRef(null);
   const prevGroupRef = useRef({});
+  const prevPendingRef = useRef({});
   const roomRef = useRef("");
   const userRef = useRef(null);
   const nameRef = useRef(name);
   const avatarRef = useRef(avatar);
-  const customStatusesRef = useRef(customStatuses);
+  const screenRef = useRef(screen);
 
   useEffect(() => { nameRef.current = name; }, [name]);
   useEffect(() => { avatarRef.current = avatar; }, [avatar]);
-  useEffect(() => { customStatusesRef.current = customStatuses; }, [customStatuses]);
+  useEffect(() => { screenRef.current = screen; }, [screen]);
 
-  // Merge default + room custom statuses
   const allStatuses = [...DEFAULT_STATUSES, ...customStatuses];
   const isOwner = roomMeta.owner === userId;
 
   useEffect(() => {
     try {
       const s = JSON.parse(localStorage.getItem("ts_v5") || "null");
-      if (s) {
-        setName(s.name || ""); setAvatar(s.avatar || AVATARS[0]);
-        setDark(!!s.dark);
-      }
+      if (s) { setName(s.name || ""); setAvatar(s.avatar || AVATARS[0]); setDark(!!s.dark); }
     } catch (e) {}
     const h = new Date().getHours();
     if (h >= 22 || h < 7) setDndAuto(true);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    return () => { clearInterval(pollRef.current); clearInterval(waitPollRef.current); };
   }, []);
 
   const saveMeta = (o = {}) => {
-    try {
-      localStorage.setItem("ts_v5", JSON.stringify({ name: nameRef.current, avatar: avatarRef.current, dark, ...o }));
-    } catch (e) {}
+    try { localStorage.setItem("ts_v5", JSON.stringify({ name: nameRef.current, avatar: avatarRef.current, dark, ...o })); } catch (e) {}
   };
 
+  // ---- POLLING: board ----
   const startPolling = (code, uid) => {
-    if (pollRef.current) clearInterval(pollRef.current);
+    clearInterval(pollRef.current);
     const poll = async () => {
       try {
-        // Poll members
-        const data = await dbGet("/rooms/" + code + "/members");
-        const safe = data || {};
+        const members = await dbGet("/rooms/" + code + "/members") || {};
+        const meta = await dbGet("/rooms/" + code + "/meta") || {};
+        const pending = await dbGet("/rooms/" + code + "/pending") || {};
 
-        // Check if we were removed by admin
-        if (uid && !safe[uid] && screen === "board") {
+        // Kicked detection: if I'm not in members anymore and room still exists
+        if (screenRef.current === "board" && !members[uid]) {
           clearInterval(pollRef.current);
           setToast("You were removed from the room by the admin.");
-          setTimeout(() => { setScreen("setup"); setUserId(null); setGroup({}); setRoomCode(""); }, 1500);
+          setTimeout(() => { setScreen("setup"); setUserId(null); setGroup({}); setRoomCode(""); setRoomMeta({}); }, 1800);
           return;
         }
 
-        // Poll room meta (owner + shared custom statuses)
-        const meta = await dbGet("/rooms/" + code + "/meta");
-        if (meta) {
-          setRoomMeta(meta);
-          if (meta.customStatuses) setCustomStatuses(meta.customStatuses);
+        setRoomMeta(meta);
+        if (meta.customStatuses) setCustomStatuses(meta.customStatuses);
+
+        // Notify admin of new join requests
+        if (meta.owner === uid) {
+          Object.keys(pending).forEach((pid) => {
+            if (!prevPendingRef.current[pid]) {
+              playChime();
+              setToast(pending[pid].name + " wants to join!");
+            }
+          });
+          prevPendingRef.current = pending;
+          setPendingRequests(pending);
         }
 
         setGroup(prev => {
-          Object.keys(safe).forEach((id) => {
-            const m = safe[id];
-            const allSt = [...DEFAULT_STATUSES, ...(meta && meta.customStatuses ? meta.customStatuses : customStatusesRef.current)];
-            if (id !== uid && prevGroupRef.current[id] && prevGroupRef.current[id].status !== m.status) {
+          Object.keys(members).forEach((id) => {
+            const m = members[id];
+            const allSt = [...DEFAULT_STATUSES, ...(meta.customStatuses || [])];
+            if (id !== uid && prev[id] && prev[id].status !== m.status) {
               const found = allSt.find((s) => s.id === m.status);
               setToast(m.name + " is now " + (found ? found.label + " " + found.emoji : m.status));
               playChime();
             }
           });
-          prevGroupRef.current = safe;
-          return safe;
+          prevGroupRef.current = members;
+          return members;
         });
       } catch (e) {}
     };
     poll();
     pollRef.current = setInterval(poll, 3000);
+  };
+
+  // ---- POLLING: waiting room ----
+  const startWaitPolling = (code, uid) => {
+    clearInterval(waitPollRef.current);
+    const poll = async () => {
+      try {
+        const pending = await dbGet("/rooms/" + code + "/pending") || {};
+        const members = await dbGet("/rooms/" + code + "/members") || {};
+
+        // Approved: I'm now in members
+        if (members[uid]) {
+          clearInterval(waitPollRef.current);
+          const meta = await dbGet("/rooms/" + code + "/meta") || {};
+          setRoomMeta(meta);
+          if (meta.customStatuses) setCustomStatuses(meta.customStatuses);
+          setGroup(members);
+          setToast("You've been approved! Welcome 🎉");
+          setScreen("board");
+          startPolling(code, uid);
+          return;
+        }
+
+        // Denied: my pending request was removed but I'm not in members
+        if (!pending[uid]) {
+          clearInterval(waitPollRef.current);
+          setToast("Your request was denied.");
+          setTimeout(() => { setScreen("setup"); setUserId(null); setRoomCode(""); }, 1800);
+        }
+      } catch (e) {}
+    };
+    poll();
+    waitPollRef.current = setInterval(poll, 3000);
   };
 
   const writeMe = (code, uid, st, note) => {
@@ -206,33 +246,71 @@ function App() {
     });
   };
 
-  const join = async (code) => {
+  // ---- CREATE ROOM ----
+  const createRoom = async () => {
     if (!name.trim()) return;
     setConnecting(true); setConnError("");
     const id = "u_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6);
-    const rc = code || Math.random().toString(36).slice(2, 8).toUpperCase();
+    const rc = Math.random().toString(36).slice(2, 8).toUpperCase();
     try {
-      const isNew = !code; // creating a new room
       await writeMe(rc, id, myStatus, myNote);
-
-      if (isNew) {
-        // Set owner in meta
-        await dbSet("/rooms/" + rc + "/meta", { owner: id, customStatuses: [] });
-        setRoomMeta({ owner: id, customStatuses: [] });
-      } else {
-        const meta = await dbGet("/rooms/" + rc + "/meta");
-        if (meta) { setRoomMeta(meta); if (meta.customStatuses) setCustomStatuses(meta.customStatuses); }
-      }
-
+      await dbSet("/rooms/" + rc + "/meta", { owner: id, customStatuses: [] });
       setUserId(id); setRoomCode(rc);
       roomRef.current = rc; userRef.current = id;
+      setRoomMeta({ owner: id, customStatuses: [] });
       startPolling(rc, id);
       saveMeta();
       setScreen("board");
-    } catch (e) {
-      setConnError("Could not connect: " + e.message);
-    }
+    } catch (e) { setConnError("Could not connect: " + e.message); }
     setConnecting(false);
+  };
+
+  // ---- REQUEST TO JOIN ----
+  const requestJoin = async (code) => {
+    if (!name.trim()) return;
+    setConnecting(true); setConnError("");
+    const id = "u_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6);
+    try {
+      // Check room exists
+      const meta = await dbGet("/rooms/" + code + "/meta");
+      if (!meta) { setConnError("Room not found. Check the code."); setConnecting(false); return; }
+      // Write to pending
+      await dbSet("/rooms/" + code + "/pending/" + id, {
+        name: nameRef.current, avatar: avatarRef.current, status: myStatus, note: myNote, ts: Date.now()
+      });
+      setUserId(id); setRoomCode(code);
+      roomRef.current = code; userRef.current = id;
+      saveMeta();
+      setScreen("waiting");
+      startWaitPolling(code, id);
+    } catch (e) { setConnError("Could not connect: " + e.message); }
+    setConnecting(false);
+  };
+
+  // ---- ADMIN: APPROVE ----
+  const approveRequest = async (pid) => {
+    const req = pendingRequests[pid];
+    if (!req) return;
+    await dbSet("/rooms/" + roomRef.current + "/members/" + pid, { ...req, ts: Date.now() });
+    await dbDelete("/rooms/" + roomRef.current + "/pending/" + pid);
+    setPendingRequests(prev => { const n = {...prev}; delete n[pid]; return n; });
+    setToast(req.name + " approved!");
+  };
+
+  // ---- ADMIN: DENY ----
+  const denyRequest = async (pid) => {
+    await dbDelete("/rooms/" + roomRef.current + "/pending/" + pid);
+    setPendingRequests(prev => { const n = {...prev}; delete n[pid]; return n; });
+  };
+
+  // ---- ADMIN: REMOVE MEMBER ----
+  const removeMember = async (id) => {
+    try {
+      await dbDelete("/rooms/" + roomRef.current + "/members/" + id);
+      setGroup(prev => { const n = {...prev}; delete n[id]; return n; });
+      setConfirmRemove(null);
+      setToast("Member removed.");
+    } catch (e) { setToast("Failed to remove. Try again."); }
   };
 
   const updateStatus = async (sid) => {
@@ -242,21 +320,18 @@ function App() {
 
   const updateNote = async (note) => {
     setMyNote(note);
-    await dbPatch("/rooms/" + roomRef.current + "/members/" + userRef.current, { note: note, ts: Date.now() });
+    await dbPatch("/rooms/" + roomRef.current + "/members/" + userRef.current, { note, ts: Date.now() });
   };
 
   const leave = async () => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    await dbDelete("/rooms/" + roomRef.current + "/members/" + userRef.current);
-    // If owner leaves, delete entire room
-    if (isOwner) await dbDelete("/rooms/" + roomRef.current);
+    clearInterval(pollRef.current); clearInterval(waitPollRef.current);
+    if (screen === "waiting") {
+      await dbDelete("/rooms/" + roomRef.current + "/pending/" + userRef.current);
+    } else {
+      await dbDelete("/rooms/" + roomRef.current + "/members/" + userRef.current);
+      if (isOwner) await dbDelete("/rooms/" + roomRef.current);
+    }
     setScreen("setup"); setUserId(null); setGroup({}); setRoomCode(""); setRoomMeta({});
-  };
-
-  const removeMember = async (id) => {
-    await dbDelete("/rooms/" + roomRef.current + "/members/" + id);
-    setConfirmRemove(null);
-    setToast("Member removed.");
   };
 
   const addCustom = async () => {
@@ -267,7 +342,6 @@ function App() {
     const ns = { id: "c_" + Date.now(), label: customLabel.trim(), emoji: customEmoji, color: colors[idx], bg: bgs[idx], dbg: "#222", custom: true };
     const updated = [...customStatuses, ns];
     setCustomStatuses(updated);
-    // Save to Firebase so ALL members see it
     await dbSet("/rooms/" + roomRef.current + "/meta/customStatuses", updated);
     setCustomLabel(""); setCustomEmoji("✨"); setShowModal(false);
   };
@@ -281,6 +355,7 @@ function App() {
 
   const myStatusObj = allStatuses.find((s) => s.id === myStatus) || DEFAULT_STATUSES[0];
   const others = Object.entries(group).filter(([id]) => id !== userId).sort(([, a], [, b]) => b.ts - a.ts);
+  const pendingList = Object.entries(pendingRequests);
 
   const d = dark;
   const textColor = d ? "#f0f0f0" : "#111";
@@ -314,6 +389,7 @@ function App() {
     );
   }
 
+  // ---- SETUP SCREEN ----
   if (screen === "setup") return (
     <div style={{ background: d ? "#111" : "#f5f5f5", minHeight: "100vh", color: textColor }}>
       {toast && <Toast msg={toast} onClose={() => setToast(null)} />}
@@ -323,14 +399,12 @@ function App() {
             <h2 style={{ fontSize: 24, fontWeight: 500, marginBottom: 4 }}>True Status</h2>
             <p style={{ fontSize: 14, color: mutedColor }}>Share your real status with your circle.</p>
           </div>
-          <button onClick={() => setDark((x) => !x)} style={{ ...btnBase, fontSize: 18, padding: "6px 10px", borderRadius: 20 }}>
-            {d ? "☀️" : "🌙"}
-          </button>
+          <button onClick={() => setDark((x) => !x)} style={{ ...btnBase, fontSize: 18, padding: "6px 10px", borderRadius: 20 }}>{d ? "☀️" : "🌙"}</button>
         </div>
 
         <div style={{ marginBottom: 16 }}>
           <label style={{ fontSize: 13, color: mutedColor, display: "block", marginBottom: 6 }}>Your name</label>
-          <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Arjun" onKeyDown={(e) => { if (e.key === "Enter") join(); }} />
+          <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Arjun" onKeyDown={(e) => { if (e.key === "Enter" && joinCode.trim()) requestJoin(joinCode); }} />
         </div>
 
         <div style={{ marginBottom: 16 }}>
@@ -350,7 +424,7 @@ function App() {
           <StatusGrid selected={myStatus} onSelect={setMyStatus} />
         </div>
 
-        <button onClick={() => join()} disabled={!name.trim() || connecting}
+        <button onClick={createRoom} disabled={!name.trim() || connecting}
           style={{ ...btnBase, width: "100%", padding: "10px 0", fontWeight: 500, marginBottom: 10, opacity: name.trim() ? 1 : 0.4 }}>
           {connecting ? "Connecting..." : "✦ Create a room"}
         </button>
@@ -358,37 +432,48 @@ function App() {
         <div style={{ display: "flex", gap: 8 }}>
           <input style={{ ...inputStyle, letterSpacing: 2 }} value={joinCode}
             onChange={(e) => setJoinCode(e.target.value.toUpperCase())} placeholder="Enter room code" />
-          <button onClick={() => { if (joinCode.trim() && name.trim()) join(joinCode.trim()); }}
+          <button onClick={() => { if (joinCode.trim() && name.trim()) requestJoin(joinCode.trim()); }}
             disabled={!joinCode.trim() || !name.trim() || connecting}
             style={{ ...btnBase, whiteSpace: "nowrap", opacity: joinCode.trim() && name.trim() ? 1 : 0.4 }}>
-            Join room
+            Request to join
           </button>
         </div>
 
-        {connError && (
-          <div style={{ marginTop: 12, padding: "10px 14px", background: d ? "#501313" : "#FCEBEB", borderRadius: 8, fontSize: 12, color: "#E24B4A" }}>
-            {connError}
-          </div>
-        )}
-        {dndAuto && (
-          <div style={{ marginTop: 16, padding: "10px 14px", background: d ? "#26215C" : "#EEEDFE", borderRadius: 8, fontSize: 13, color: "#8B7FE8" }}>
-            It's late — Auto DND on.
-          </div>
-        )}
+        {connError && <div style={{ marginTop: 12, padding: "10px 14px", background: d ? "#501313" : "#FCEBEB", borderRadius: 8, fontSize: 12, color: "#E24B4A" }}>{connError}</div>}
+        {dndAuto && <div style={{ marginTop: 16, padding: "10px 14px", background: d ? "#26215C" : "#EEEDFE", borderRadius: 8, fontSize: 13, color: "#8B7FE8" }}>It's late — Auto DND on.</div>}
       </div>
     </div>
   );
 
+  // ---- WAITING SCREEN ----
+  if (screen === "waiting") return (
+    <div style={{ background: d ? "#111" : "#f5f5f5", minHeight: "100vh", color: textColor, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      {toast && <Toast msg={toast} onClose={() => setToast(null)} />}
+      <div style={{ textAlign: "center", padding: "2rem 1rem", maxWidth: 360 }}>
+        <div style={{ fontSize: 48, marginBottom: 20 }}>⏳</div>
+        <h2 style={{ fontSize: 20, fontWeight: 500, marginBottom: 8 }}>Waiting for approval</h2>
+        <p style={{ fontSize: 14, color: mutedColor, marginBottom: 8 }}>
+          Your request to join room <strong style={{ letterSpacing: 1 }}>{roomCode}</strong> has been sent.
+        </p>
+        <p style={{ fontSize: 13, color: mutedColor, marginBottom: 28 }}>The admin will approve or deny your request shortly.</p>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "center", marginBottom: 28 }}>
+          <span style={{ fontSize: 28 }}>{avatar}</span>
+          <div style={{ textAlign: "left" }}>
+            <p style={{ fontWeight: 500 }}>{name}</p>
+            <p style={{ fontSize: 13, color: mutedColor }}>Waiting...</p>
+          </div>
+        </div>
+        <button onClick={leave} style={{ ...btnBase, padding: "8px 24px", color: "#E24B4A", borderColor: "#E24B4A" }}>Cancel request</button>
+      </div>
+    </div>
+  );
+
+  // ---- BOARD SCREEN ----
   return (
     <div style={{ background: d ? "#111" : "#f5f5f5", minHeight: "100vh", color: textColor }}>
       {toast && <Toast msg={toast} onClose={() => setToast(null)} />}
       {confirmRemove && (
-        <ConfirmModal
-          msg={"Remove " + confirmRemove.name + " from the room?"}
-          onConfirm={() => removeMember(confirmRemove.id)}
-          onCancel={() => setConfirmRemove(null)}
-          dark={dark}
-        />
+        <ConfirmModal msg={"Remove " + confirmRemove.name + " from the room?"} onConfirm={() => removeMember(confirmRemove.id)} onCancel={() => setConfirmRemove(null)} dark={dark} />
       )}
       {showModal && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
@@ -432,6 +517,32 @@ function App() {
           </div>
         </div>
 
+        {/* Pending requests — admin only */}
+        {isOwner && pendingList.length > 0 && (
+          <div style={{ background: d ? "#1a2a1a" : "#eafbea", border: "0.5px solid " + (d ? "#2a4a2a" : "#b2dfb2"), borderRadius: 12, padding: "1rem", marginBottom: 16 }}>
+            <p style={{ fontSize: 12, fontWeight: 600, color: "#1D9E75", letterSpacing: 0.5, marginBottom: 10 }}>JOIN REQUESTS ({pendingList.length})</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {pendingList.map(([pid, req]) => (
+                <div key={pid} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 24 }}>{req.avatar || "?"}</span>
+                  <div style={{ flex: 1 }}>
+                    <p style={{ fontWeight: 500, fontSize: 14 }}>{req.name}</p>
+                    <p style={{ fontSize: 12, color: mutedColor }}>{timeAgo(req.ts)}</p>
+                  </div>
+                  <button onClick={() => approveRequest(pid)}
+                    style={{ padding: "5px 12px", borderRadius: 8, border: "none", background: "#1D9E75", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>
+                    Approve
+                  </button>
+                  <button onClick={() => denyRequest(pid)}
+                    style={{ padding: "5px 12px", borderRadius: 8, border: "none", background: "#E24B4A", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>
+                    Deny
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* My Status */}
         <div style={{ background: surfaceBg, border: "0.5px solid " + cardBorder, borderRadius: 12, padding: "1rem", marginBottom: 16 }}>
           <p style={{ fontSize: 11, color: mutedColor, fontWeight: 500, letterSpacing: 0.5, marginBottom: 10 }}>MY STATUS</p>
@@ -464,10 +575,8 @@ function App() {
 
         {/* Friends */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <p style={{ fontSize: 11, color: mutedColor, fontWeight: 500, letterSpacing: 0.5 }}>
-            FRIENDS ({others.length})
-          </p>
-          {isOwner && others.length > 0 && <p style={{ fontSize: 11, color: mutedColor }}>Tap × to remove</p>}
+          <p style={{ fontSize: 11, color: mutedColor, fontWeight: 500, letterSpacing: 0.5 }}>MEMBERS ({others.length})</p>
+          {isOwner && others.length > 0 && <p style={{ fontSize: 11, color: mutedColor }}>Tap Remove to kick</p>}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -481,14 +590,14 @@ function App() {
             const st = allStatuses.find((s) => s.id === m.status) || DEFAULT_STATUSES[0];
             const memberIsOwner = roomMeta.owner === id;
             return (
-              <div key={id} style={{ background: cardBg, border: "0.5px solid " + cardBorder, borderRadius: 12, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, position: "relative" }}>
+              <div key={id} style={{ background: cardBg, border: "0.5px solid " + cardBorder, borderRadius: 12, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
                 <div style={{ width: 44, height: 44, borderRadius: "50%", background: d ? (st.dbg || "#222") : st.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>
                   {m.avatar || "?"}
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 500, fontSize: 15 }}>{m.name}</span>
-                    {memberIsOwner && <span style={{ fontSize: 10 }}>👑</span>}
+                    {memberIsOwner && <span style={{ fontSize: 12 }}>👑</span>}
                     {m.status === "sleeping" && <span style={{ fontSize: 10, background: d ? "#26215C" : "#EEEDFE", color: "#8B7FE8", padding: "2px 8px", borderRadius: 6 }}>do not disturb</span>}
                     {(m.status === "busy" || m.status === "focusing" || m.status === "silent") && <span style={{ fontSize: 10, background: d ? "#4A1B0C" : "#FAECE7", color: "#D85A30", padding: "2px 8px", borderRadius: 6 }}>urgent only</span>}
                   </div>
@@ -502,7 +611,7 @@ function App() {
                   <span style={{ fontSize: 11, color: mutedColor }}>{timeAgo(m.ts)}</span>
                   {isOwner && !memberIsOwner && (
                     <button onClick={() => setConfirmRemove({ id, name: m.name })}
-                      style={{ fontSize: 11, padding: "2px 8px", borderRadius: 6, border: "0.5px solid #E24B4A", color: "#E24B4A", background: "transparent", cursor: "pointer" }}>
+                      style={{ fontSize: 11, padding: "3px 10px", borderRadius: 6, border: "0.5px solid #E24B4A", color: "#E24B4A", background: "transparent", cursor: "pointer" }}>
                       Remove
                     </button>
                   )}
