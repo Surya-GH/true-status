@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>True Status App</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+const DEFAULT_STATUSES = [
+  { id:"online",   label:"Online",   emoji:"🟢", color:"#1D9E75", bg:"#E1F5EE", dbg:"#04342C" },
+  { id:"sleeping", label:"Sleeping", emoji:"😴", color:"#8B7FE8", bg:"#EEEDFE", dbg:"#26215C" },
+  { id:"silent",   label:"Silent",   emoji:"🔕", color:"#888780", bg:"#F1EFE8", dbg:"#2C2C2A" },
+  { id:"busy",     label:"Busy",     emoji:"🎯", color:"#D85A30", bg:"#FAECE7", dbg:"#4A1B0C" },
+  { id:"driving",  label:"Driving",  emoji:"🚗", color:"#378ADD", bg:"#E6F1FB", dbg:"#042C53" },
+  { id:"eating",   label:"Eating",   emoji:"🍽️", color:"#BA7517", bg:"#FAEEDA", dbg:"#412402" },
+  { id:"away",     label:"Away",     emoji:"📵", color:"#E24B4A", bg:"#FCEBEB", dbg:"#501313" },
+  { id:"focusing", label:"Focusing", emoji:"💻", color:"#639922", bg:"#EAF3DE", dbg:"#173404" },
+];
+
+const AVATARS = ["🐻","🦊","🐼","🐸","🦁","🐯","🐨","🦋","🐬","🦄"];
+const EMOJI_OPTIONS = ["✨","🎵","🏋️","📚","🌙","☕","🎮","🏠","🌿","💤","🔥","😊","🎯","🌊","🎨","🍕","💪","🧘"];
+const DB_URL = "https://true-status-7d9f6-default-rtdb.asia-southeast1.firebasedatabase.app";
+
+async function dbGet(path) {
+  const r = await fetch(DB_URL + path + ".json");
+  if (!r.ok) throw new Error("GET " + r.status);
+  return r.json();
+}
+async function dbSet(path, data) {
+  const r = await fetch(DB_URL + path + ".json", {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data)
+  });
+  if (!r.ok) throw new Error("SET " + r.status);
+}
+async function dbDelete(path) {
+  await fetch(DB_URL + path + ".json", { method: "DELETE" });
+}
+
+function timeAgo(ts) {
+  if (!ts) return "";
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 10) return "just now";
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  return Math.floor(s / 3600) + "h ago";
+}
+
+function playChime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+    osc.start(); osc.stop(ctx.currentTime + 0.4);
+  } catch (e) {}
+}
+
+function Toast({ msg, onClose }) {
+  useEffect(() => { const t = setTimeout(onClose, 3500); return () => clearTimeout(t); }, []);
+  return (
+    <div style={{ position:"fixed", bottom:24, left:"50%", transform:"translateX(-50%)", padding:"10px 20px", borderRadius:10, fontSize:13, fontWeight:500, zIndex:999, whiteSpace:"nowrap", background:"#333", color:"#fff" }}>
+      {msg}
+    </div>
+  );
+}
+
+function App() {
+  const [dark, setDark] = useState(false);
+  const [screen, setScreen] = useState("setup");
+  const [name, setName] = useState("");
+  const [avatar, setAvatar] = useState(AVATARS[0]);
+  const [userId, setUserId] = useState(null);
+  const [myStatus, setMyStatus] = useState("online");
+  const [myNote, setMyNote] = useState("");
+  const [roomCode, setRoomCode] = useState("");
+  const [joinCode, setJoinCode] = useState("");
+  const [group, setGroup] = useState({});
+  const [toast, setToast] = useState(null);
+  const [dndAuto, setDndAuto] = useState(false);
+  const [customStatuses, setCustomStatuses] = useState([]);
+  const [showModal, setShowModal] = useState(false);
+  const [customLabel, setCustomLabel] = useState("");
+  const [customEmoji, setCustomEmoji] = useState("✨");
+  const [connecting, setConnecting] = useState(false);
+  const [connError, setConnError] = useState("");
+
+  const pollRef = useRef(null);
+  const prevGroupRef = useRef({});
+  const roomRef = useRef("");
+  const userRef = useRef(null);
+  const nameRef = useRef(name);
+  const avatarRef = useRef(avatar);
+
+  useEffect(() => { nameRef.current = name; }, [name]);
+  useEffect(() => { avatarRef.current = avatar; }, [avatar]);
+
+  const allStatuses = [...DEFAULT_STATUSES, ...customStatuses];
+
+  useEffect(() => {
+    try {
+      const s = JSON.parse(localStorage.getItem("ts_v4") || "null");
+      if (s) {
+        setName(s.name || ""); setAvatar(s.avatar || AVATARS[0]);
+        setDark(!!s.dark);
+        if (s.customStatuses) setCustomStatuses(s.customStatuses);
+      }
+    } catch (e) {}
+    const h = new Date().getHours();
+    if (h >= 22 || h < 7) setDndAuto(true);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
+
+  const saveMeta = (o = {}) => {
+    try {
+      localStorage.setItem("ts_v4", JSON.stringify({ name: nameRef.current, avatar: avatarRef.current, dark, customStatuses, ...o }));
+    } catch (e) {}
+  };
+
+  const startPolling = (code, uid) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    const poll = async () => {
+      try {
+        const data = await dbGet("/rooms/" + code);
+        const safe = data || {};
+        setGroup(safe);
+        Object.keys(safe).forEach((id) => {
+          const m = safe[id];
+          if (id !== uid && prevGroupRef.current[id] && prevGroupRef.current[id].status !== m.status) {
+            const found = allStatuses.find((s) => s.id === m.status);
+            setToast(m.name + " is now " + (found ? found.label + " " + found.emoji : m.status));
+            playChime();
+          }
+        });
+        prevGroupRef.current = safe;
+      } catch (e) {}
+    };
+    poll();
+    pollRef.current = setInterval(poll, 3000);
+  };
+
+  const writeMe = (code, uid, st, note) => {
+    return dbSet("/rooms/" + code + "/" + uid, {
+      name: nameRef.current, avatar: avatarRef.current, status: st, note: note, ts: Date.now()
+    });
+  };
+
+  const join = async (code) => {
+    if (!name.trim()) return;
+    setConnecting(true); setConnError("");
+    const id = "u_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6);
+    const rc = code || Math.random().toString(36).slice(2, 8).toUpperCase();
+    try {
+      await writeMe(rc, id, myStatus, myNote);
+      setUserId(id); setRoomCode(rc);
+      roomRef.current = rc; userRef.current = id;
+      startPolling(rc, id);
+      saveMeta();
+      setScreen("board");
+    } catch (e) {
+      setConnError("Could not connect: " + e.message);
+    }
+    setConnecting(false);
+  };
+
+  const updateStatus = async (sid) => {
+    setMyStatus(sid);
+    await writeMe(roomRef.current, userRef.current, sid, myNote);
+  };
+
+  const updateNote = async (note) => {
+    setMyNote(note);
+    await dbSet("/rooms/" + roomRef.current + "/" + userRef.current + "/note", note);
+    await dbSet("/rooms/" + roomRef.current + "/" + userRef.current + "/ts", Date.now());
+  };
+
+  const leave = async () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    await dbDelete("/rooms/" + roomRef.current + "/" + userRef.current);
+    setScreen("setup"); setUserId(null); setGroup({}); setRoomCode("");
+  };
+
+  const addCustom = () => {
+    if (!customLabel.trim()) return;
+    const colors = ["#1D9E75","#8B7FE8","#D85A30","#378ADD","#BA7517","#E24B4A","#639922","#D4537E"];
+    const bgs    = ["#E1F5EE","#EEEDFE","#FAECE7","#E6F1FB","#FAEEDA","#FCEBEB","#EAF3DE","#FBEAF0"];
+    const idx = customStatuses.length % colors.length;
+    const ns = { id: "c_" + Date.now(), label: customLabel.trim(), emoji: customEmoji, color: colors[idx], bg: bgs[idx], dbg: "#222", custom: true };
+    const updated = [...customStatuses, ns];
+    setCustomStatuses(updated); saveMeta({ customStatuses: updated });
+    setCustomLabel(""); setCustomEmoji("✨"); setShowModal(false);
+  };
+
+  const removeCustom = (id) => {
+    const updated = customStatuses.filter((s) => s.id !== id);
+    setCustomStatuses(updated);
+    if (myStatus === id) setMyStatus("online");
+    saveMeta({ customStatuses: updated });
+  };
+
+  const myStatusObj = allStatuses.find((s) => s.id === myStatus) || DEFAULT_STATUSES[0];
+  const others = Object.entries(group).filter(([id]) => id !== userId).sort(([, a], [, b]) => b.ts - a.ts);
+
+  const d = dark;
+  const textColor = d ? "#f0f0f0" : "#111";
+  const mutedColor = d ? "#777" : "#666";
+  const cardBg = d ? "#1e1e1e" : "#fff";
+  const cardBorder = d ? "#2e2e2e" : "#e0e0e0";
+  const surfaceBg = d ? "#1a1a1a" : "#efefef";
+  const inputStyle = { background: d ? "#222" : "#fff", color: textColor, border: "0.5px solid " + (d ? "#444" : "#ccc"), borderRadius: 8, padding: "8px 12px", width: "100%", fontSize: 14, fontFamily: "inherit", outline: "none" };
+  const btnBase = { background: "transparent", color: textColor, border: "0.5px solid " + (d ? "#444" : "#ccc"), borderRadius: 8, padding: "8px 16px", fontSize: 14, cursor: "pointer", fontFamily: "inherit" };
+
+  function StatusGrid({ selected, onSelect }) {
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6 }}>
+        {allStatuses.map((s) => (
+          <button key={s.id} onClick={() => onSelect(s.id)}
+            style={{ ...btnBase, padding: "6px 2px", border: s.id === selected ? "2px solid " + s.color : "0.5px solid " + (d ? "#333" : "#ddd"), background: s.id === selected ? (d ? s.dbg : s.bg) : "transparent", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, position: "relative" }}>
+            {s.custom && (
+              <span onClick={(e) => { e.stopPropagation(); removeCustom(s.id); }}
+                style={{ position: "absolute", top: 2, right: 4, fontSize: 9, opacity: 0.5 }}>✕</span>
+            )}
+            <span style={{ fontSize: 16 }}>{s.emoji}</span>
+            <span style={{ fontSize: 10, color: s.id === selected ? s.color : mutedColor }}>{s.label}</span>
+          </button>
+        ))}
+        <button onClick={() => setShowModal(true)}
+          style={{ ...btnBase, padding: "6px 2px", border: "0.5px dashed #888", display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+          <span style={{ fontSize: 16 }}>＋</span>
+          <span style={{ fontSize: 10, color: mutedColor }}>Custom</span>
+        </button>
+      </div>
+    );
+  }
+
+  if (screen === "setup") return (
+    <div style={{ background: d ? "#111" : "#f5f5f5", minHeight: "100vh", color: textColor }}>
+      {toast && <Toast msg={toast} onClose={() => setToast(null)} />}
+      <div style={{ maxWidth: 440, margin: "0 auto", padding: "2rem 1rem" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28 }}>
+          <div>
+            <h2 style={{ fontSize: 24, fontWeight: 500, marginBottom: 4 }}>True Status</h2>
+            <p style={{ fontSize: 14, color: mutedColor }}>Share your real status with your circle.</p>
+          </div>
+          <button onClick={() => setDark((x) => !x)} style={{ ...btnBase, fontSize: 18, padding: "6px 10px", borderRadius: 20 }}>
+            {d ? "☀️" : "🌙"}
+          </button>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 13, color: mutedColor, display: "block", marginBottom: 6 }}>Your name</label>
+          <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Arjun" onKeyDown={(e) => { if (e.key === "Enter") join(); }} />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 13, color: mutedColor, display: "block", marginBottom: 8 }}>Pick an avatar</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {AVATARS.map((a) => (
+              <button key={a} onClick={() => setAvatar(a)}
+                style={{ ...btnBase, width: 40, height: 40, fontSize: 20, padding: 0, border: a === avatar ? "2px solid #378ADD" : "0.5px solid " + (d ? "#444" : "#ccc"), background: a === avatar ? "#E6F1FB" : "transparent" }}>
+                {a}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 24 }}>
+          <label style={{ fontSize: 13, color: mutedColor, display: "block", marginBottom: 8 }}>Starting status</label>
+          <StatusGrid selected={myStatus} onSelect={setMyStatus} />
+        </div>
+
+        <button onClick={() => join()} disabled={!name.trim() || connecting}
+          style={{ ...btnBase, width: "100%", padding: "10px 0", fontWeight: 500, marginBottom: 10, opacity: name.trim() ? 1 : 0.4 }}>
+          {connecting ? "Connecting..." : "Create a room"}
+        </button>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <input style={{ ...inputStyle, letterSpacing: 2 }} value={joinCode}
+            onChange={(e) => setJoinCode(e.target.value.toUpperCase())} placeholder="Enter room code" />
+          <button onClick={() => { if (joinCode.trim() && name.trim()) join(joinCode.trim()); }}
+            disabled={!joinCode.trim() || !name.trim() || connecting}
+            style={{ ...btnBase, whiteSpace: "nowrap", opacity: joinCode.trim() && name.trim() ? 1 : 0.4 }}>
+            Join room
+          </button>
+        </div>
+
+        {connError && (
+          <div style={{ marginTop: 12, padding: "10px 14px", background: d ? "#501313" : "#FCEBEB", borderRadius: 8, fontSize: 12, color: "#E24B4A" }}>
+            {connError}
+          </div>
+        )}
+        {dndAuto && (
+          <div style={{ marginTop: 16, padding: "10px 14px", background: d ? "#26215C" : "#EEEDFE", borderRadius: 8, fontSize: 13, color: "#8B7FE8" }}>
+            It's late — Auto DND on.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ background: d ? "#111" : "#f5f5f5", minHeight: "100vh", color: textColor }}>
+      {toast && <Toast msg={toast} onClose={() => setToast(null)} />}
+      {showModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
+          <div style={{ background: cardBg, border: "0.5px solid " + cardBorder, borderRadius: 14, padding: "1.5rem", width: 320, maxWidth: "90vw" }}>
+            <h3 style={{ fontSize: 16, fontWeight: 500, marginBottom: 16 }}>Add custom status</h3>
+            <label style={{ fontSize: 13, color: mutedColor, display: "block", marginBottom: 6 }}>Status name</label>
+            <input style={{ ...inputStyle, marginBottom: 14 }} value={customLabel} onChange={(e) => setCustomLabel(e.target.value)} placeholder="e.g. At the gym" />
+            <label style={{ fontSize: 13, color: mutedColor, display: "block", marginBottom: 8 }}>Pick an emoji</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+              {EMOJI_OPTIONS.map((em) => (
+                <button key={em} onClick={() => setCustomEmoji(em)}
+                  style={{ ...btnBase, width: 36, height: 36, fontSize: 18, padding: 0, border: em === customEmoji ? "2px solid #378ADD" : "0.5px solid " + (d ? "#444" : "#ccc"), background: em === customEmoji ? "#E6F1FB" : "transparent" }}>
+                  {em}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => setShowModal(false)} style={{ ...btnBase, flex: 1 }}>Cancel</button>
+              <button onClick={addCustom} disabled={!customLabel.trim()} style={{ ...btnBase, flex: 1, fontWeight: 500, opacity: customLabel.trim() ? 1 : 0.4 }}>Add</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ maxWidth: 520, margin: "0 auto", padding: "1.5rem 1rem" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <div>
+            <h2 style={{ fontSize: 20, fontWeight: 500 }}>True Status</h2>
+            <p style={{ fontSize: 13, color: mutedColor, marginTop: 2 }}>
+              Room: <strong style={{ letterSpacing: 1 }}>{roomCode}</strong> · {Object.keys(group).length} online
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setDark((x) => !x)} style={{ ...btnBase, fontSize: 16, padding: "6px 10px", borderRadius: 20 }}>{d ? "☀️" : "🌙"}</button>
+            <button onClick={() => { if (navigator.clipboard) navigator.clipboard.writeText(roomCode); setToast("Copied: " + roomCode); }} style={btnBase}>Share</button>
+            <button onClick={leave} style={btnBase}>Leave</button>
+          </div>
+        </div>
+
+        <div style={{ background: surfaceBg, border: "0.5px solid " + cardBorder, borderRadius: 12, padding: "1rem", marginBottom: 16 }}>
+          <p style={{ fontSize: 11, color: mutedColor, fontWeight: 500, letterSpacing: 0.5, marginBottom: 10 }}>MY STATUS</p>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+            <span style={{ fontSize: 30 }}>{avatar}</span>
+            <div>
+              <p style={{ fontWeight: 500, fontSize: 15 }}>{name}</p>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+                <span style={{ fontSize: 14 }}>{myStatusObj.emoji}</span>
+                <span style={{ fontSize: 13, color: myStatusObj.color, fontWeight: 500 }}>{myStatusObj.label}</span>
+              </div>
+            </div>
+            {dndAuto && <span style={{ marginLeft: "auto", fontSize: 11, background: d ? "#26215C" : "#EEEDFE", color: "#8B7FE8", padding: "3px 8px", borderRadius: 6 }}>Auto DND</span>}
+          </div>
+          <div style={{ marginBottom: 12 }}><StatusGrid selected={myStatus} onSelect={updateStatus} /></div>
+          <input style={inputStyle} value={myNote} onChange={(e) => updateNote(e.target.value)} placeholder="Add a note... (e.g. call only if urgent)" />
+        </div>
+
+        <div style={{ background: surfaceBg, border: "0.5px solid " + cardBorder, borderRadius: 12, padding: "1rem", display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <div>
+            <p style={{ fontSize: 13, fontWeight: 500 }}>Auto Do Not Disturb</p>
+            <p style={{ fontSize: 12, color: mutedColor }}>Switches to Sleeping 10 PM – 7 AM</p>
+          </div>
+          <button onClick={() => setDndAuto((p) => !p)}
+            style={{ ...btnBase, padding: "5px 14px", borderRadius: 20, background: dndAuto ? (d ? "#26215C" : "#EEEDFE") : "transparent", color: dndAuto ? "#8B7FE8" : mutedColor, border: dndAuto ? "1.5px solid #8B7FE8" : "0.5px solid " + (d ? "#444" : "#ccc"), fontWeight: dndAuto ? 500 : 400 }}>
+            {dndAuto ? "On" : "Off"}
+          </button>
+        </div>
+
+        <p style={{ fontSize: 11, color: mutedColor, fontWeight: 500, letterSpacing: 0.5, marginBottom: 10 }}>FRIENDS ({others.length})</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {others.length === 0 && (
+            <div style={{ textAlign: "center", padding: "2rem 0", color: mutedColor, fontSize: 14 }}>
+              No one else here yet.<br />
+              <span style={{ fontSize: 13 }}>Share code: <strong style={{ letterSpacing: 1 }}>{roomCode}</strong></span>
+            </div>
+          )}
+          {others.map(([id, m]) => {
+            const st = allStatuses.find((s) => s.id === m.status) || DEFAULT_STATUSES[0];
+            return (
+              <div key={id} style={{ background: cardBg, border: "0.5px solid " + cardBorder, borderRadius: 12, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ width: 44, height: 44, borderRadius: "50%", background: d ? (st.dbg || "#222") : st.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>
+                  {m.avatar || "?"}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 500, fontSize: 15 }}>{m.name}</span>
+                    {m.status === "sleeping" && <span style={{ fontSize: 10, background: d ? "#26215C" : "#EEEDFE", color: "#8B7FE8", padding: "2px 8px", borderRadius: 6 }}>do not disturb</span>}
+                    {(m.status === "busy" || m.status === "focusing" || m.status === "silent") && <span style={{ fontSize: 10, background: d ? "#4A1B0C" : "#FAECE7", color: "#D85A30", padding: "2px 8px", borderRadius: 6 }}>urgent only</span>}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+                    <span style={{ fontSize: 14 }}>{st.emoji}</span>
+                    <span style={{ fontSize: 13, color: st.color, fontWeight: 500 }}>{st.label}</span>
+                  </div>
+                  {m.note && <p style={{ fontSize: 12, color: mutedColor, marginTop: 4 }}>{m.note}</p>}
+                </div>
+                <span style={{ fontSize: 11, color: mutedColor, flexShrink: 0 }}>{timeAgo(m.ts)}</span>
+              </div>
+            );
+          })}
+        </div>
+        <p style={{ textAlign: "center", fontSize: 12, color: mutedColor, marginTop: 20 }}>Polls every 3 seconds</p>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.render(React.createElement(App), document.getElementById("root"));
+</script>
+</body>
+</html>
