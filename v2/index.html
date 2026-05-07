@@ -102,7 +102,7 @@ function ConfirmModal({ msg, onConfirm, onCancel, dark }) {
   );
 }
 
-export default function App() {
+function App() {
   const [dark, setDark] = useState(false);
   const [screen, setScreen] = useState("setup"); // setup | waiting | board
   const [name, setName] = useState("");
