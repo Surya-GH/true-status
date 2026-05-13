@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>True Status</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<!-- Firebase -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/9.23.0/firebase-app-compat.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/9.23.0/firebase-auth-compat.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/9.23.0/firebase-database-compat.min.js"></script>
+<script>
+firebase.initializeApp({
+  apiKey:"AIzaSyCtEJoA27NVOS1BcFER7vTbxPq7Z5e7uH0",
+  authDomain:"true-status-7d9f6.firebaseapp.com",
+  databaseURL:"https://true-status-7d9f6-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId:"true-status-7d9f6",
+  storageBucket:"true-status-7d9f6.firebasestorage.app",
+  messagingSenderId:"422557642661",
+  appId:"1:422557642661:web:41d32ebdd3b0303a04424c"
+});
+window.__auth = firebase.auth();
+window.__db   = firebase.database();
+</script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden;height:100vh;}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-thumb{background:#555;border-radius:4px;}
+input,button{font-family:inherit;}
+</style>
+</head>
+<body>
+<div id="root" style="height:100vh;"></div>
+<script type="text/babel" data-presets="react">
+const {useState,useEffect,useRef} = React;
+
+const DEFAULT_STATUSES=[
+  {id:"online",   label:"Online",   emoji:"🟢",color:"#1D9E75",bg:"#E1F5EE",dbg:"#04342C"},
+  {id:"sleeping", label:"Sleeping", emoji:"😴",color:"#8B7FE8",bg:"#EEEDFE",dbg:"#26215C"},
+  {id:"silent",   label:"Silent",   emoji:"🔕",color:"#888780",bg:"#F1EFE8",dbg:"#2C2C2A"},
+  {id:"busy",     label:"Busy",     emoji:"🎯",color:"#D85A30",bg:"#FAECE7",dbg:"#4A1B0C"},
+  {id:"driving",  label:"Driving",  emoji:"🚗",color:"#378ADD",bg:"#E6F1FB",dbg:"#042C53"},
+  {id:"eating",   label:"Eating",   emoji:"🍽️",color:"#BA7517",bg:"#FAEEDA",dbg:"#412402"},
+  {id:"away",     label:"Away",     emoji:"📵",color:"#E24B4A",bg:"#FCEBEB",dbg:"#501313"},
+  {id:"focusing", label:"Focusing", emoji:"💻",color:"#639922",bg:"#EAF3DE",dbg:"#173404"},
+];
+const AVATARS=["🐻","🦊","🐼","🐸","🦁","🐯","🐨","🦋","🐬","🦄"];
+const EMOJI_OPT=["✨","🎵","🏋️","📚","🌙","☕","🎮","🏠","🌿","💤","🔥","😊","🎯","🌊","🎨","🍕","💪","🧘"];
+
+const db  = ()=>window.__db;
+const auth= ()=>window.__auth;
+
+function ref(p){return db().ref(p);}
+async function dbGet(p){const s=await ref(p).once("value");return s.val();}
+async function dbSet(p,v){await ref(p).set(v);}
+async function dbPatch(p,v){await ref(p).update(v);}
+async function dbDel(p){await ref(p).remove();}
+function dbOn(p,cb){const r=ref(p);r.on("value",s=>cb(s.val()));return()=>r.off("value");}
+
+function timeAgo(ts){
+  if(!ts)return"";
+  const s=Math.floor((Date.now()-ts)/1000);
+  if(s<10)return"just now";if(s<60)return s+"s ago";
+  if(s<3600)return Math.floor(s/60)+"m ago";return Math.floor(s/3600)+"h ago";
+}
+function chime(){
+  try{
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    const o=ctx.createOscillator(),g=ctx.createGain();
+    o.connect(g);g.connect(ctx.destination);o.type="sine";
+    o.frequency.setValueAtTime(880,ctx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(440,ctx.currentTime+0.3);
+    g.gain.setValueAtTime(0.12,ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.4);
+    o.start();o.stop(ctx.currentTime+0.4);
+  }catch(e){}
+}
+
+/* ── tiny components ── */
+function Toast({msg,onClose}){
+  useEffect(()=>{const t=setTimeout(onClose,3500);return()=>clearTimeout(t);},[]);
+  return <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",padding:"10px 20px",borderRadius:10,fontSize:13,fontWeight:500,zIndex:9999,whiteSpace:"nowrap",background:"#1a1a1a",color:"#fff",boxShadow:"0 4px 20px rgba(0,0,0,.4)"}}>{msg}</div>;
+}
+function Modal({children,onClose,dark}){
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{background:dark?"#1e1e1e":"#fff",border:"0.5px solid "+(dark?"#333":"#e0e0e0"),borderRadius:16,padding:"1.5rem",width:340,maxWidth:"92vw",maxHeight:"90vh",overflowY:"auto"}}>
+      {children}
+    </div>
+  </div>;
+}
+
+/* ════════════════════════════════
+   MAIN APP
+════════════════════════════════ */
+function App(){
+  const [dark,setDark]=useState(false);
+  const [authUser,setAuthUser]=useState(null);   // firebase user
+  const [authLoading,setAuthLoading]=useState(true);
+  const [profile,setProfile]=useState({name:"",avatar:AVATARS[0]});
+  const [globalStatus,setGlobalStatus]=useState("online");
+  const [globalNote,setGlobalNote]=useState("");
+  const [rooms,setRooms]=useState({});           // {code:{name,members,meta,pending,unread}}
+  const [activeRoom,setActiveRoom]=useState(null);
+  const [screen,setScreen]=useState("home");     // home|board|waiting
+  const [waitingRoom,setWaitingRoom]=useState(null);
+  const [toast,setToast]=useState(null);
+  const [modal,setModal]=useState(null);
+  const [modalData,setModalData]=useState({});
+  const [sidebarOpen,setSidebarOpen]=useState(true);
+  const [connecting,setConnecting]=useState(false);
+
+  /* refs so callbacks always have fresh values */
+  const uidRef=useRef(null);
+  const profileRef=useRef(profile);
+  const globalStatusRef=useRef(globalStatus);
+  const globalNoteRef=useRef(globalNote);
+  const roomsRef=useRef(rooms);
+  const activeRoomRef=useRef(activeRoom);
+  const screenRef=useRef(screen);
+  const pollRefs=useRef({});       // room-level firebase listeners unsub fns
+  const waitUnsubRef=useRef(null);
+  const userUnsub=useRef(null);
+
+  useEffect(()=>{profileRef.current=profile;},[profile]);
+  useEffect(()=>{globalStatusRef.current=globalStatus;},[globalStatus]);
+  useEffect(()=>{globalNoteRef.current=globalNote;},[globalNote]);
+  useEffect(()=>{roomsRef.current=rooms;},[rooms]);
+  useEffect(()=>{activeRoomRef.current=activeRoom;},[activeRoom]);
+  useEffect(()=>{screenRef.current=screen;},[screen]);
+
+  /* ── Firebase Auth listener ── */
+  useEffect(()=>{
+    const unsub=auth().onAuthStateChanged(async user=>{
+      setAuthLoading(false);
+      if(user){
+        setAuthUser(user);
+        uidRef.current=user.uid;
+        // load profile from DB
+        const saved=await dbGet("/users/"+user.uid);
+        const p={
+          name:saved&&saved.name?saved.name:(user.displayName||""),
+          avatar:saved&&saved.avatar?saved.avatar:AVATARS[0],
+        };
+        setProfile(p);
+        profileRef.current=p;
+        if(saved&&saved.status) setGlobalStatus(saved.status);
+        if(saved&&saved.note)   setGlobalNote(saved.note);
+        if(saved&&saved.dark)   setDark(true);
+        // load rooms user belongs to
+        if(saved&&saved.rooms){
+          Object.keys(saved.rooms).forEach(code=>subscribeRoom(code,user.uid));
+        }
+      } else {
+        setAuthUser(null); uidRef.current=null;
+        // clean up all listeners
+        Object.values(pollRefs.current).forEach(u=>u());
+        pollRefs.current={};
+      }
+    });
+    return unsub;
+  },[]);
+
+  /* ── Save user profile to DB ── */
+  async function saveProfile(uid,p,status,note,dk){
+    await dbPatch("/users/"+uid,{name:p.name,avatar:p.avatar,status,note,dark:dk,updatedAt:Date.now()});
+  }
+
+  /* ── Google Sign-in ── */
+  async function signInGoogle(){
+    const provider=new firebase.auth.GoogleAuthProvider();
+    try{ await auth().signInWithPopup(provider); }
+    catch(e){ setToast("Sign-in failed: "+e.message); }
+  }
+  async function signOut(){
+    Object.values(pollRefs.current).forEach(u=>u());
+    pollRefs.current={};
+    if(waitUnsubRef.current){ waitUnsubRef.current(); waitUnsubRef.current=null; }
+    setRooms({}); setActiveRoom(null); setScreen("home");
+    await auth().signOut();
+  }
+
+  /* ── Subscribe to a room (realtime) ── */
+  function subscribeRoom(code,uid){
+    if(pollRefs.current[code]) return; // already subscribed
+    const unsub=dbOn("/rooms/"+code,data=>{
+      if(!data){ // room deleted
+        setRooms(prev=>{const n={...prev};delete n[code];return n;});
+        // remove from user's room list
+        dbDel("/users/"+uid+"/rooms/"+code);
+        if(activeRoomRef.current===code){setActiveRoom(null);setScreen("home");}
+        setToast("Room "+code+" was closed.");
+        return;
+      }
+      const members=data.members||{};
+      const meta=data.meta||{};
+      const pending=data.pending||{};
+
+      // kicked?
+      if(members.__kicked&&members.__kicked[uid]){
+        unsub(); delete pollRefs.current[code];
+        dbDel("/users/"+uid+"/rooms/"+code);
+        setRooms(prev=>{const n={...prev};delete n[code];return n;});
+        if(activeRoomRef.current===code){setActiveRoom(null);setScreen("home");}
+        setToast("You were removed from room "+(meta.roomName||code));
+        return;
+      }
+
+      setRooms(prev=>{
+        const prevRoom=prev[code]||{};
+        const prevMembers=prevRoom.members||{};
+        const isActive=activeRoomRef.current===code;
+        let unread=isActive?0:(prevRoom.unread||0);
+        const allSt=[...DEFAULT_STATUSES,...(meta.customStatuses||[])];
+        Object.keys(members).forEach(id=>{
+          const m=members[id];
+          if(id!==uid&&prevMembers[id]&&prevMembers[id].status!==m.status){
+            if(isActive){ const f=allSt.find(s=>s.id===m.status); setToast(m.name+" is now "+(f?f.label+" "+f.emoji:m.status)); chime(); }
+            else unread++;
+          }
+        });
+        // new join requests (owner only)
+        if(meta.owner===uid){
+          const prevPend=prevRoom.pending||{};
+          Object.keys(pending).forEach(pid=>{ if(!prevPend[pid]){ chime(); setToast((pending[pid].name||"Someone")+" wants to join "+(meta.roomName||code)); }});
+        }
+        return{...prev,[code]:{members,meta,pending,unread,name:meta.roomName||code}};
+      });
+    });
+    pollRefs.current[code]=unsub;
+  }
+
+  /* ── write my entry into a room ── */
+  async function writeMe(code,uid,status,note){
+    await dbPatch("/rooms/"+code+"/members/"+uid,{
+      name:profileRef.current.name,
+      avatar:profileRef.current.avatar,
+      status,note,ts:Date.now()
+    });
+  }
+
+  /* ── update global status → push to ALL rooms ── */
+  async function updateGlobalStatus(sid){
+    setGlobalStatus(sid); globalStatusRef.current=sid;
+    const uid=uidRef.current; if(!uid)return;
+    await dbPatch("/users/"+uid,{status:sid,updatedAt:Date.now()});
+    // push to every joined room
+    const myRooms=Object.keys(roomsRef.current);
+    await Promise.all(myRooms.map(code=>{
+      const m=roomsRef.current[code]&&roomsRef.current[code].members&&roomsRef.current[code].members[uid];
+      if(m) return writeMe(code,uid,sid,globalNoteRef.current);
+      return Promise.resolve();
+    }));
+  }
+
+  async function updateGlobalNote(note){
+    setGlobalNote(note); globalNoteRef.current=note;
+    const uid=uidRef.current; if(!uid)return;
+    await dbPatch("/users/"+uid,{note,updatedAt:Date.now()});
+    const myRooms=Object.keys(roomsRef.current);
+    await Promise.all(myRooms.map(code=>{
+      const m=roomsRef.current[code]&&roomsRef.current[code].members&&roomsRef.current[code].members[uid];
+      if(m) return dbPatch("/rooms/"+code+"/members/"+uid,{note,ts:Date.now()});
+      return Promise.resolve();
+    }));
+  }
+
+  /* ── Create room ── */
+  async function createRoom(roomName){
+    const uid=uidRef.current; if(!uid)return;
+    setConnecting(true);
+    const code=Math.random().toString(36).slice(2,8).toUpperCase();
+    try{
+      await dbSet("/rooms/"+code+"/meta",{owner:uid,roomName:roomName||code,customStatuses:[],createdAt:Date.now()});
+      await writeMe(code,uid,globalStatusRef.current,globalNoteRef.current);
+      await dbSet("/users/"+uid+"/rooms/"+code,true);
+      subscribeRoom(code,uid);
+      setActiveRoom(code); setScreen("board"); setModal(null);
+      await saveProfile(uid,profileRef.current,globalStatusRef.current,globalNoteRef.current,dark);
+    }catch(e){setToast("Failed: "+e.message);}
+    setConnecting(false);
+  }
+
+  /* ── Request to join ── */
+  async function requestJoin(code){
+    const uid=uidRef.current; if(!uid)return;
+    setConnecting(true);
+    try{
+      const meta=await dbGet("/rooms/"+code+"/meta");
+      if(!meta){setToast("Room not found.");setConnecting(false);return;}
+      await dbSet("/rooms/"+code+"/pending/"+uid,{
+        name:profileRef.current.name,avatar:profileRef.current.avatar,
+        status:globalStatusRef.current,ts:Date.now()
+      });
+      setWaitingRoom({code,name:meta.roomName||code});
+      setModal(null); setScreen("waiting");
+      // listen for approval
+      if(waitUnsubRef.current) waitUnsubRef.current();
+      const unsub=dbOn("/rooms/"+code+"/members/"+uid,val=>{
+        if(val){ // approved
+          unsub(); waitUnsubRef.current=null;
+          dbSet("/users/"+uid+"/rooms/"+code,true);
+          subscribeRoom(code,uid);
+          setActiveRoom(code); setScreen("board"); setWaitingRoom(null);
+          setToast("Welcome! You've been approved 🎉");
+        }
+      });
+      // also watch if denied (pending entry removed but not in members)
+      const denyUnsub=dbOn("/rooms/"+code+"/pending/"+uid,val=>{
+        if(val===null){
+          denyUnsub(); 
+          dbGet("/rooms/"+code+"/members/"+uid).then(m=>{
+            if(!m){ setScreen("home"); setWaitingRoom(null); setToast("Your request was denied."); }
+          });
+        }
+      });
+      waitUnsubRef.current=()=>{unsub();denyUnsub();};
+    }catch(e){setToast("Could not connect: "+e.message);}
+    setConnecting(false);
+  }
+
+  /* ── Approve / Deny ── */
+  async function approveRequest(code,pid){
+    const req=rooms[code]&&rooms[code].pending&&rooms[code].pending[pid];
+    if(!req)return;
+    await dbSet("/rooms/"+code+"/members/"+pid,{...req,ts:Date.now()});
+    await dbDel("/rooms/"+code+"/pending/"+pid);
+    setToast((req.name||"User")+" approved!");
+  }
+  async function denyRequest(code,pid){
+    await dbDel("/rooms/"+code+"/pending/"+pid);
+  }
+
+  /* ── Remove member ── */
+  async function removeMember(code,id){
+    await dbDel("/rooms/"+code+"/members/"+id);
+    // write a kicked flag so their listener fires
+    await dbSet("/rooms/"+code+"/members/__kicked/"+id,true);
+    await dbDel("/rooms/"+code+"/members/__kicked/"+id);
+    await dbDel("/users/"+id+"/rooms/"+code);
+    setModal(null); setToast("Member removed.");
+  }
+
+  /* ── Leave room ── */
+  async function leaveRoom(code){
+    const uid=uidRef.current; if(!uid)return;
+    const isOwner=rooms[code]&&rooms[code].meta&&rooms[code].meta.owner===uid;
+    if(pollRefs.current[code]){pollRefs.current[code]();delete pollRefs.current[code];}
+    await dbDel("/rooms/"+code+"/members/"+uid);
+    await dbDel("/users/"+uid+"/rooms/"+code);
+    if(isOwner) await dbDel("/rooms/"+code);
+    setRooms(prev=>{const n={...prev};delete n[code];return n;});
+    if(activeRoom===code){setActiveRoom(null);setScreen("home");}
+  }
+
+  /* ── Custom statuses ── */
+  async function addCustomStatus(code,label,emoji){
+    const cur=(rooms[code]&&rooms[code].meta&&rooms[code].meta.customStatuses)||[];
+    const colors=["#1D9E75","#8B7FE8","#D85A30","#378ADD","#BA7517","#E24B4A","#639922","#D4537E"];
+    const bgs=["#E1F5EE","#EEEDFE","#FAECE7","#E6F1FB","#FAEEDA","#FCEBEB","#EAF3DE","#FBEAF0"];
+    const idx=cur.length%colors.length;
+    const ns={id:"c_"+Date.now(),label,emoji,color:colors[idx],bg:bgs[idx],dbg:"#222",custom:true};
+    await dbPatch("/rooms/"+code+"/meta",{customStatuses:[...cur,ns]});
+    setModal(null);
+  }
+  async function removeCustomStatus(code,id){
+    const cur=(rooms[code]&&rooms[code].meta&&rooms[code].meta.customStatuses)||[];
+    await dbPatch("/rooms/"+code+"/meta",{customStatuses:cur.filter(s=>s.id!==id)});
+    if(globalStatus===id) updateGlobalStatus("online");
+  }
+
+  /* ── helpers ── */
+  function allStatuses(code){return[...DEFAULT_STATUSES,...((rooms[code]&&rooms[code].meta&&rooms[code].meta.customStatuses)||[])];}
+  function openRoom(code){setActiveRoom(code);setScreen("board");setRooms(prev=>({...prev,[code]:{...prev[code],unread:0}}));}
+
+  /* ── styles ── */
+  const d=dark;
+  const tc=d?"#f0f0f0":"#111";
+  const mc=d?"#777":"#666";
+  const cbg=d?"#1e1e1e":"#fff";
+  const cbr=d?"#2a2a2a":"#e0e0e0";
+  const sbg=d?"#181818":"#f0f0f0";
+  const appBg=d?"#0d0d0d":"#f5f5f5";
+  const sidebarBg=d?"#111":"#fafafa";
+  const sidebarBdr=d?"#1e1e1e":"#e8e8e8";
+  const inp={background:d?"#222":"#fff",color:tc,border:"0.5px solid "+(d?"#444":"#ccc"),borderRadius:8,padding:"8px 12px",width:"100%",fontSize:14,fontFamily:"inherit",outline:"none"};
+  const btn={background:"transparent",color:tc,border:"0.5px solid "+(d?"#444":"#ccc"),borderRadius:8,padding:"8px 16px",fontSize:14,cursor:"pointer",fontFamily:"inherit"};
+
+  const activeRoomData=activeRoom?rooms[activeRoom]:null;
+  const roomMembers=activeRoomData?activeRoomData.members||{}:{};
+  const roomMeta=activeRoomData?activeRoomData.meta||{}:{};
+  const roomPending=activeRoomData?activeRoomData.pending||{}:{};
+  const isOwner=roomMeta.owner===(authUser&&authUser.uid);
+  const myStatusObj=allStatuses(activeRoom).find(s=>s.id===globalStatus)||DEFAULT_STATUSES[0];
+  const others=Object.entries(roomMembers).filter(([id,m])=>id!==(authUser&&authUser.uid)&&id!=="__kicked").sort(([,a],[,b])=>b.ts-a.ts);
+  const pendingList=Object.entries(roomPending);
+  const roomList=Object.entries(rooms);
+  const totalUnread=roomList.reduce((s,[,r])=>s+(r.unread||0),0);
+
+  function StatusGrid({code,selected,onSelect}){
+    const sts=allStatuses(code);
+    const owner=rooms[code]&&rooms[code].meta&&rooms[code].meta.owner===(authUser&&authUser.uid);
+    return <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+      {sts.map(s=>(
+        <button key={s.id} onClick={()=>onSelect(s.id)}
+          style={{...btn,padding:"6px 2px",border:s.id===selected?"2px solid "+s.color:"0.5px solid "+(d?"#333":"#ddd"),background:s.id===selected?(d?s.dbg:s.bg):"transparent",display:"flex",flexDirection:"column",alignItems:"center",gap:3,position:"relative"}}>
+          {s.custom&&owner&&<span onClick={e=>{e.stopPropagation();removeCustomStatus(code,s.id);}} style={{position:"absolute",top:2,right:3,fontSize:9,opacity:0.5,lineHeight:1}}>✕</span>}
+          <span style={{fontSize:16}}>{s.emoji}</span>
+          <span style={{fontSize:10,color:s.id===selected?s.color:mc}}>{s.label}</span>
+        </button>
+      ))}
+      <button onClick={()=>setModal("custom")} style={{...btn,padding:"6px 2px",border:"0.5px dashed #888",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+        <span style={{fontSize:16}}>＋</span><span style={{fontSize:10,color:mc}}>Custom</span>
+      </button>
+    </div>;
+  }
+
+  /* ════ LOADING ════ */
+  if(authLoading) return <div style={{background:appBg,height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:tc,fontSize:15}}>Loading...</div>;
+
+  /* ════ SIGN IN ════ */
+  if(!authUser) return (
+    <div style={{background:appBg,height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:tc}}>
+      {toast&&<Toast msg={toast} onClose={()=>setToast(null)}/>}
+      <div style={{textAlign:"center",padding:"2rem",maxWidth:360}}>
+        <div style={{fontSize:56,marginBottom:16}}>📡</div>
+        <h1 style={{fontSize:28,fontWeight:700,marginBottom:8}}>True Status</h1>
+        <p style={{color:mc,fontSize:14,marginBottom:32,lineHeight:1.6}}>Share your real status with your close circle. Let them know when to reach out — and when not to.</p>
+        <button onClick={signInGoogle}
+          style={{...btn,padding:"12px 28px",fontSize:15,fontWeight:600,background:"#fff",color:"#333",border:"1px solid #ddd",borderRadius:12,boxShadow:"0 2px 8px rgba(0,0,0,.1)",display:"flex",alignItems:"center",gap:10,margin:"0 auto"}}>
+          <span style={{fontSize:20}}>G</span> Continue with Google
+        </button>
+        <p style={{color:mc,fontSize:12,marginTop:16}}>Your account persists across devices and sessions.</p>
+      </div>
+    </div>
+  );
+
+  /* ════ WAITING ════ */
+  if(screen==="waiting") return (
+    <div style={{background:appBg,height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:tc}}>
+      {toast&&<Toast msg={toast} onClose={()=>setToast(null)}/>}
+      <div style={{textAlign:"center",padding:"2rem",maxWidth:360}}>
+        <div style={{fontSize:52,marginBottom:20}}>⏳</div>
+        <h2 style={{fontSize:20,fontWeight:600,marginBottom:8}}>Waiting for approval</h2>
+        <p style={{fontSize:14,color:mc,marginBottom:6}}>Your request to join <strong>{waitingRoom&&waitingRoom.name}</strong> was sent.</p>
+        <p style={{fontSize:13,color:mc,marginBottom:28}}>The admin will approve or deny shortly.</p>
+        <div style={{display:"flex",alignItems:"center",gap:12,justifyContent:"center",background:cbg,border:"0.5px solid "+cbr,borderRadius:12,padding:"12px 20px",marginBottom:24}}>
+          <span style={{fontSize:30}}>{profile.avatar}</span>
+          <div style={{textAlign:"left"}}>
+            <p style={{fontWeight:500}}>{profile.name}</p>
+            <p style={{fontSize:12,color:mc}}>Pending...</p>
+          </div>
+        </div>
+        <button onClick={()=>{if(waitUnsubRef.current){waitUnsubRef.current();waitUnsubRef.current=null;}if(waitingRoom)dbDel("/rooms/"+waitingRoom.code+"/pending/"+(authUser&&authUser.uid));setScreen("home");setWaitingRoom(null);}}
+          style={{...btn,color:"#E24B4A",borderColor:"#E24B4A",padding:"8px 24px"}}>Cancel request</button>
+      </div>
+    </div>
+  );
+
+  /* ════ MAIN LAYOUT ════ */
+  return (
+    <div style={{display:"flex",height:"100vh",background:appBg,color:tc}}>
+      {toast&&<Toast msg={toast} onClose={()=>setToast(null)}/>}
+
+      {/* ── MODALS ── */}
+      {modal==="create"&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <h3 style={{fontSize:16,fontWeight:600,marginBottom:4}}>Create a room</h3>
+          <p style={{fontSize:13,color:mc,marginBottom:16}}>Give your room a name your friends will recognise.</p>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:6}}>Room name</label>
+          <input style={{...inp,marginBottom:16}} id="rname" placeholder="e.g. Family, Squad, Work..." onKeyDown={e=>{if(e.key==="Enter")createRoom(document.getElementById("rname").value.trim());}}/>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={()=>createRoom(document.getElementById("rname").value.trim())} disabled={connecting} style={{...btn,flex:1,fontWeight:600,background:"#1D9E75",color:"#fff",border:"none"}}>{connecting?"Creating...":"Create"}</button>
+          </div>
+        </Modal>
+      )}
+      {modal==="join"&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <h3 style={{fontSize:16,fontWeight:600,marginBottom:4}}>Join a room</h3>
+          <p style={{fontSize:13,color:mc,marginBottom:16}}>Enter the 6-letter code from your friend.</p>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:6}}>Room code</label>
+          <input style={{...inp,marginBottom:16,letterSpacing:3,textTransform:"uppercase"}} id="jcode" placeholder="e.g. X7KQ2A" onKeyDown={e=>{if(e.key==="Enter"){const v=document.getElementById("jcode").value.trim().toUpperCase();if(v)requestJoin(v);}}}/>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={()=>{const v=document.getElementById("jcode").value.trim().toUpperCase();if(v)requestJoin(v);}} disabled={connecting} style={{...btn,flex:1,fontWeight:600,background:"#378ADD",color:"#fff",border:"none"}}>{connecting?"Requesting...":"Request to join"}</button>
+          </div>
+        </Modal>
+      )}
+      {modal==="custom"&&activeRoom&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <h3 style={{fontSize:16,fontWeight:600,marginBottom:16}}>Add custom status</h3>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:6}}>Status name</label>
+          <input style={{...inp,marginBottom:14}} id="clabel" placeholder="e.g. At the gym"/>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:8}}>Emoji</label>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:16}} id="ce-wrap">
+            {EMOJI_OPT.map(em=>(
+              <button key={em} id={"ce_"+em} onClick={()=>{
+                document.querySelectorAll("[id^='ce_']").forEach(b=>b.style.background="transparent");
+                document.getElementById("ce_"+em).style.background=d?"#333":"#e8f0fb";
+                document.getElementById("ce-wrap").dataset.sel=em;
+              }} style={{...btn,width:36,height:36,fontSize:18,padding:0}}>{em}</button>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={()=>{const l=document.getElementById("clabel").value.trim(),e=document.getElementById("ce-wrap").dataset.sel||"✨";if(l)addCustomStatus(activeRoom,l,e);}} style={{...btn,flex:1,fontWeight:600,background:"#8B7FE8",color:"#fff",border:"none"}}>Add</button>
+          </div>
+        </Modal>
+      )}
+      {modal==="confirmRemove"&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <p style={{fontSize:15,marginBottom:20,lineHeight:1.5}}>Remove <strong>{modalData.name}</strong> from this room?</p>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={()=>removeMember(activeRoom,modalData.id)} style={{...btn,flex:1,fontWeight:600,background:"#E24B4A",color:"#fff",border:"none"}}>Remove</button>
+          </div>
+        </Modal>
+      )}
+      {modal==="editProfile"&&(
+        <Modal dark={d} onClose={()=>setModal(null)}>
+          <h3 style={{fontSize:16,fontWeight:600,marginBottom:16}}>Edit profile</h3>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:6}}>Display name</label>
+          <input style={{...inp,marginBottom:14}} id="pname" defaultValue={profile.name}/>
+          <label style={{fontSize:13,color:mc,display:"block",marginBottom:8}}>Avatar</label>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}} id="av-wrap" data-sel={profile.avatar}>
+            {AVATARS.map(a=>(
+              <button key={a} id={"av_"+a} onClick={()=>{
+                document.querySelectorAll("[id^='av_']").forEach(b=>b.style.border="0.5px solid "+(d?"#444":"#ccc"));
+                document.getElementById("av_"+a).style.border="2px solid #378ADD";
+                document.getElementById("av-wrap").dataset.sel=a;
+              }} style={{...btn,width:40,height:40,fontSize:20,padding:0,border:a===profile.avatar?"2px solid #378ADD":"0.5px solid "+(d?"#444":"#ccc")}}>{a}</button>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>setModal(null)} style={{...btn,flex:1}}>Cancel</button>
+            <button onClick={async()=>{
+              const n=document.getElementById("pname").value.trim();
+              const av=document.getElementById("av-wrap").dataset.sel||profile.avatar;
+              if(n){
+                const p={name:n,avatar:av};
+                setProfile(p);profileRef.current=p;
+                await saveProfile(authUser.uid,p,globalStatusRef.current,globalNoteRef.current,dark);
+                // update all rooms
+                Object.keys(roomsRef.current).forEach(async code=>{
+                  const m=roomsRef.current[code]&&roomsRef.current[code].members&&roomsRef.current[code].members[authUser.uid];
+                  if(m) await dbPatch("/rooms/"+code+"/members/"+authUser.uid,{name:n,avatar:av,ts:Date.now()});
+                });
+                setToast("Profile updated!"); setModal(null);
+              }
+            }} style={{...btn,flex:1,fontWeight:600,background:"#1D9E75",color:"#fff",border:"none"}}>Save</button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── SIDEBAR ── */}
+      <div style={{width:sidebarOpen?260:60,flexShrink:0,background:sidebarBg,borderRight:"0.5px solid "+sidebarBdr,display:"flex",flexDirection:"column",transition:"width 0.2s",overflow:"hidden"}}>
+        {/* top bar */}
+        <div style={{padding:"12px 10px",borderBottom:"0.5px solid "+sidebarBdr,display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+          <button onClick={()=>setSidebarOpen(p=>!p)} style={{...btn,width:36,height:36,padding:0,fontSize:16,flexShrink:0,border:"none"}}>{sidebarOpen?"◀":"▶"}</button>
+          {sidebarOpen&&<><span style={{fontWeight:700,fontSize:15,flex:1,whiteSpace:"nowrap"}}>True Status</span>
+          {totalUnread>0&&<span style={{background:"#E24B4A",color:"#fff",borderRadius:10,fontSize:11,padding:"2px 7px",fontWeight:700}}>{totalUnread}</span>}</>}
+        </div>
+
+        {/* profile pill */}
+        <div onClick={()=>setModal("editProfile")} style={{padding:"10px 10px",borderBottom:"0.5px solid "+sidebarBdr,display:"flex",alignItems:"center",gap:8,cursor:"pointer",flexShrink:0,transition:"background 0.15s"}} >
+          <div style={{width:36,height:36,borderRadius:"50%",background:d?"#222":"#e8e8e8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>{profile.avatar}</div>
+          {sidebarOpen&&<div style={{minWidth:0,flex:1}}>
+            <p style={{fontWeight:600,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{profile.name}</p>
+            <div style={{display:"flex",alignItems:"center",gap:4,marginTop:1}}>
+              <span style={{fontSize:11}}>{myStatusObj.emoji}</span>
+              <span style={{fontSize:11,color:myStatusObj.color,fontWeight:500}}>{myStatusObj.label}</span>
+            </div>
+          </div>}
+          {sidebarOpen&&<span style={{fontSize:11,color:mc,flexShrink:0}}>✎</span>}
+        </div>
+
+        {/* global status quick-pick */}
+        {sidebarOpen&&(
+          <div style={{padding:"10px 10px",borderBottom:"0.5px solid "+sidebarBdr,flexShrink:0}}>
+            <p style={{fontSize:10,color:mc,fontWeight:600,letterSpacing:0.5,marginBottom:8}}>MY STATUS (all rooms)</p>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:4}}>
+              {DEFAULT_STATUSES.map(s=>(
+                <button key={s.id} onClick={()=>updateGlobalStatus(s.id)}
+                  style={{...btn,padding:"5px 2px",border:s.id===globalStatus?"2px solid "+s.color:"0.5px solid "+(d?"#333":"#e0e0e0"),background:s.id===globalStatus?(d?s.dbg:s.bg):"transparent",display:"flex",flexDirection:"column",alignItems:"center",gap:2,fontSize:11}}>
+                  <span style={{fontSize:15}}>{s.emoji}</span>
+                  <span style={{fontSize:9,color:s.id===globalStatus?s.color:mc}}>{s.label}</span>
+                </button>
+              ))}
+            </div>
+            <input value={globalNote} onChange={e=>updateGlobalNote(e.target.value)} placeholder="Note for all rooms..."
+              style={{...inp,fontSize:12,padding:"6px 10px",marginTop:8}}/>
+          </div>
+        )}
+
+        {/* room list */}
+        <div style={{flex:1,overflowY:"auto",padding:"6px 0"}}>
+          {roomList.length===0&&sidebarOpen&&<p style={{fontSize:12,color:mc,padding:"16px",textAlign:"center",lineHeight:1.6}}>No rooms yet.<br/>Create or join one!</p>}
+          {roomList.map(([code,r])=>{
+            const isActive=activeRoom===code&&screen==="board";
+            const cnt=Object.keys(r.members||{}).filter(k=>k!=="__kicked").length;
+            const unread=r.unread||0;
+            const ownerRoom=r.meta&&r.meta.owner===(authUser&&authUser.uid);
+            return (
+              <div key={code} onClick={()=>openRoom(code)}
+                style={{padding:"9px 10px",margin:"2px 6px",borderRadius:10,cursor:"pointer",background:isActive?(d?"#252525":"#ebebeb"):"transparent",display:"flex",alignItems:"center",gap:8}}>
+                <div style={{width:34,height:34,borderRadius:"50%",background:isActive?(d?"#333":"#ddd"):(d?"#1e1e1e":"#e8e8e8"),display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0,position:"relative"}}>
+                  {ownerRoom?"👑":"🏠"}
+                  {unread>0&&<span style={{position:"absolute",top:-2,right:-2,background:"#E24B4A",color:"#fff",borderRadius:8,fontSize:9,padding:"1px 4px",fontWeight:700}}>{unread}</span>}
+                </div>
+                {sidebarOpen&&<div style={{flex:1,minWidth:0}}>
+                  <p style={{fontSize:13,fontWeight:isActive?600:400,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.name||code}</p>
+                  <p style={{fontSize:10,color:mc}}>{cnt} member{cnt!==1?"s":""}</p>
+                </div>}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* bottom actions */}
+        <div style={{padding:"8px",borderTop:"0.5px solid "+sidebarBdr,display:"flex",flexDirection:"column",gap:5,flexShrink:0}}>
+          <button onClick={()=>setModal("create")} style={{...btn,padding:"7px 10px",display:"flex",alignItems:"center",gap:8,justifyContent:sidebarOpen?"flex-start":"center",fontSize:13,border:"none",background:d?"#0d1f0d":"#e8f8ee",color:"#1D9E75",fontWeight:500}}>
+            <span>＋</span>{sidebarOpen&&"Create room"}
+          </button>
+          <button onClick={()=>setModal("join")} style={{...btn,padding:"7px 10px",display:"flex",alignItems:"center",gap:8,justifyContent:sidebarOpen?"flex-start":"center",fontSize:13,border:"none",background:d?"#0d0d1f":"#e8f0fb",color:"#378ADD",fontWeight:500}}>
+            <span>→</span>{sidebarOpen&&"Join room"}
+          </button>
+          <button onClick={()=>{setDark(p=>{const nd=!p;saveProfile(authUser.uid,profileRef.current,globalStatusRef.current,globalNoteRef.current,nd);return nd;});}} style={{...btn,padding:"7px 10px",display:"flex",alignItems:"center",gap:8,justifyContent:sidebarOpen?"flex-start":"center",fontSize:13}}>
+            <span>{d?"☀️":"🌙"}</span>{sidebarOpen&&(d?"Light mode":"Dark mode")}
+          </button>
+          <button onClick={signOut} style={{...btn,padding:"7px 10px",display:"flex",alignItems:"center",gap:8,justifyContent:sidebarOpen?"flex-start":"center",fontSize:13,color:"#E24B4A",borderColor:"transparent"}}>
+            <span>⇤</span>{sidebarOpen&&"Sign out"}
+          </button>
+        </div>
+      </div>
+
+      {/* ── MAIN CONTENT ── */}
+      <div style={{flex:1,overflowY:"auto"}}>
+        {/* home empty state */}
+        {(screen==="home"||!activeRoomData)&&(
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",padding:"2rem",textAlign:"center"}}>
+            <div style={{fontSize:52,marginBottom:16}}>📡</div>
+            <h2 style={{fontSize:20,fontWeight:600,marginBottom:8}}>Hey, {profile.name}!</h2>
+            <p style={{color:mc,fontSize:14,marginBottom:28,maxWidth:300,lineHeight:1.6}}>Select a room from the sidebar, or create / join a new one.</p>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",justifyContent:"center"}}>
+              <button onClick={()=>setModal("create")} style={{...btn,padding:"10px 20px",background:"#1D9E75",color:"#fff",border:"none",fontWeight:600}}>✦ Create a room</button>
+              <button onClick={()=>setModal("join")} style={{...btn,padding:"10px 20px",background:"#378ADD",color:"#fff",border:"none",fontWeight:600}}>→ Join a room</button>
+            </div>
+          </div>
+        )}
+
+        {/* board */}
+        {screen==="board"&&activeRoomData&&(
+          <div style={{maxWidth:560,width:"100%",margin:"0 auto",padding:"1.5rem 1rem"}}>
+            {/* room header */}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <h2 style={{fontSize:18,fontWeight:700}}>{roomMeta.roomName||activeRoom}</h2>
+                  {isOwner&&<span style={{fontSize:11,background:d?"#412402":"#FAEEDA",color:"#BA7517",padding:"2px 8px",borderRadius:6,fontWeight:700}}>👑 Admin</span>}
+                </div>
+                <p style={{fontSize:12,color:mc,marginTop:2}}>Code: <strong style={{letterSpacing:1}}>{activeRoom}</strong> · {Object.keys(roomMembers).filter(k=>k!=="__kicked").length} members</p>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <button onClick={()=>{if(navigator.clipboard)navigator.clipboard.writeText(activeRoom);setToast("Code copied!");}} style={{...btn,fontSize:12,padding:"5px 10px"}}>Share</button>
+                <button onClick={()=>leaveRoom(activeRoom)} style={{...btn,fontSize:12,padding:"5px 10px",color:"#E24B4A",borderColor:"#E24B4A"}}>{isOwner?"Close":"Leave"}</button>
+              </div>
+            </div>
+
+            {/* pending requests */}
+            {isOwner&&pendingList.length>0&&(
+              <div style={{background:d?"#0d1f0d":"#e8f8ee",border:"0.5px solid "+(d?"#1a3a1a":"#b2dfb2"),borderRadius:12,padding:"1rem",marginBottom:16}}>
+                <p style={{fontSize:11,fontWeight:700,color:"#1D9E75",letterSpacing:0.5,marginBottom:10}}>JOIN REQUESTS ({pendingList.length})</p>
+                {pendingList.map(([pid,req])=>(
+                  <div key={pid} style={{display:"flex",alignItems:"center",gap:10,marginBottom:pid!==pendingList[pendingList.length-1][0]?"10px":0}}>
+                    <span style={{fontSize:24}}>{req.avatar||"?"}</span>
+                    <div style={{flex:1}}>
+                      <p style={{fontWeight:500,fontSize:14}}>{req.name}</p>
+                      <p style={{fontSize:11,color:mc}}>{timeAgo(req.ts)}</p>
+                    </div>
+                    <button onClick={()=>approveRequest(activeRoom,pid)} style={{padding:"5px 10px",borderRadius:8,border:"none",background:"#1D9E75",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:700}}>✓</button>
+                    <button onClick={()=>denyRequest(activeRoom,pid)} style={{padding:"5px 10px",borderRadius:8,border:"none",background:"#E24B4A",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:700}}>✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* my status in this room (read-only display — change via sidebar) */}
+            <div style={{background:sbg,border:"0.5px solid "+cbr,borderRadius:12,padding:"1rem",marginBottom:14}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                <p style={{fontSize:11,color:mc,fontWeight:600,letterSpacing:0.5}}>MY STATUS</p>
+                <p style={{fontSize:11,color:mc}}>Change from sidebar →</p>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:28}}>{profile.avatar}</span>
+                <div style={{flex:1}}>
+                  <p style={{fontWeight:600,fontSize:15}}>{profile.name}{isOwner?" 👑":""}</p>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3}}>
+                    <span style={{fontSize:15}}>{myStatusObj.emoji}</span>
+                    <span style={{fontSize:13,color:myStatusObj.color,fontWeight:500}}>{myStatusObj.label}</span>
+                  </div>
+                  {globalNote&&<p style={{fontSize:12,color:mc,marginTop:3}}>{globalNote}</p>}
+                </div>
+                {/* quick status buttons */}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:4}}>
+                  {DEFAULT_STATUSES.slice(0,4).map(s=>(
+                    <button key={s.id} onClick={()=>updateGlobalStatus(s.id)}
+                      style={{...btn,width:32,height:32,padding:0,fontSize:14,border:s.id===globalStatus?"2px solid "+s.color:"0.5px solid "+(d?"#333":"#e0e0e0"),background:s.id===globalStatus?(d?s.dbg:s.bg):"transparent"}}>
+                      {s.emoji}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* custom statuses for this room */}
+            {isOwner&&(
+              <div style={{marginBottom:14}}>
+                <StatusGrid code={activeRoom} selected={globalStatus} onSelect={updateGlobalStatus}/>
+              </div>
+            )}
+
+            {/* members */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <p style={{fontSize:11,color:mc,fontWeight:600,letterSpacing:0.5}}>MEMBERS ({others.length})</p>
+              {isOwner&&others.length>0&&<p style={{fontSize:11,color:mc}}>Tap Remove to kick</p>}
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {others.length===0&&(
+                <div style={{textAlign:"center",padding:"2rem 0",color:mc,fontSize:14}}>
+                  No one else here yet.<br/>
+                  <span style={{fontSize:13}}>Share code: <strong style={{letterSpacing:1}}>{activeRoom}</strong></span>
+                </div>
+              )}
+              {others.map(([id,m])=>{
+                const sts=allStatuses(activeRoom);
+                const st=sts.find(s=>s.id===m.status)||DEFAULT_STATUSES[0];
+                const memOwner=roomMeta.owner===id;
+                return (
+                  <div key={id} style={{background:cbg,border:"0.5px solid "+cbr,borderRadius:12,padding:"12px 14px",display:"flex",alignItems:"center",gap:12}}>
+                    <div style={{width:44,height:44,borderRadius:"50%",background:d?(st.dbg||"#222"):st.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>
+                      {m.avatar||"?"}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                        <span style={{fontWeight:600,fontSize:14}}>{m.name}</span>
+                        {memOwner&&<span style={{fontSize:12}}>👑</span>}
+                        {m.status==="sleeping"&&<span style={{fontSize:10,background:d?"#26215C":"#EEEDFE",color:"#8B7FE8",padding:"2px 7px",borderRadius:6}}>do not disturb</span>}
+                        {(m.status==="busy"||m.status==="focusing"||m.status==="silent")&&<span style={{fontSize:10,background:d?"#4A1B0C":"#FAECE7",color:"#D85A30",padding:"2px 7px",borderRadius:6}}>urgent only</span>}
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3}}>
+                        <span style={{fontSize:14}}>{st.emoji}</span>
+                        <span style={{fontSize:13,color:st.color,fontWeight:500}}>{st.label}</span>
+                      </div>
+                      {m.note&&<p style={{fontSize:12,color:mc,marginTop:3}}>{m.note}</p>}
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0}}>
+                      <span style={{fontSize:11,color:mc}}>{timeAgo(m.ts)}</span>
+                      {isOwner&&!memOwner&&(
+                        <button onClick={()=>{setModalData({id,name:m.name});setModal("confirmRemove");}}
+                          style={{fontSize:11,padding:"3px 8px",borderRadius:6,border:"0.5px solid #E24B4A",color:"#E24B4A",background:"transparent",cursor:"pointer"}}>Remove</button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p style={{textAlign:"center",fontSize:11,color:mc,marginTop:20}}>Live updates via Firebase</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.render(React.createElement(App),document.getElementById("root"));
+</script>
+</body>
+</html>
